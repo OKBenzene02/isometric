@@ -10,10 +10,7 @@ import 'package:isometric/features/camera/domain/dslr_enhancer.dart';
 class PhotoEditorScreen extends StatefulWidget {
   final String? imagePath;
 
-  const PhotoEditorScreen({
-    super.key,
-    required this.imagePath,
-  });
+  const PhotoEditorScreen({super.key, required this.imagePath});
 
   @override
   State<PhotoEditorScreen> createState() => _PhotoEditorScreenState();
@@ -22,6 +19,7 @@ class PhotoEditorScreen extends StatefulWidget {
 class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
   late DslrParams _params;
   bool _showingOriginal = false;
+  String _signed(double v) => v > 0 ? '+${v.round()}' : '${v.round()}';
 
   @override
   void initState() {
@@ -41,7 +39,11 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
         ),
         content: Row(
           children: [
-            const Icon(Icons.check_circle_rounded, color: AppColors.pureWhite, size: 18),
+            const Icon(
+              Icons.check_circle_rounded,
+              color: AppColors.pureWhite,
+              size: 18,
+            ),
             const SizedBox(width: 10),
             Expanded(
               child: Text(
@@ -90,19 +92,29 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
                     child: GestureDetector(
                       onTapDown: (_) => setState(() => _showingOriginal = true),
                       onTapUp: (_) => setState(() => _showingOriginal = false),
-                      onTapCancel: () => setState(() => _showingOriginal = false),
+                      onTapCancel: () =>
+                          setState(() => _showingOriginal = false),
                       child: GlassContainer(
                         borderRadius: 20,
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-                        backgroundColor: _showingOriginal ? AppColors.pureWhite : AppColors.glassBackground,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 7,
+                        ),
+                        backgroundColor: _showingOriginal
+                            ? AppColors.pureWhite
+                            : AppColors.glassBackground,
                         borderColor: AppColors.glassBorder,
                         child: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
                             Icon(
-                              _showingOriginal ? Icons.visibility_off_rounded : Icons.compare_rounded,
+                              _showingOriginal
+                                  ? Icons.visibility_off_rounded
+                                  : Icons.compare_rounded,
                               size: 14,
-                              color: _showingOriginal ? AppColors.pureBlack : AppColors.pureWhite,
+                              color: _showingOriginal
+                                  ? AppColors.pureBlack
+                                  : AppColors.pureWhite,
                             ),
                             const SizedBox(width: 6),
                             Text(
@@ -110,7 +122,9 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
                               style: AppTypography.cameraTelemetry(
                                 fontSize: 10,
                                 fontWeight: FontWeight.w700,
-                                color: _showingOriginal ? AppColors.pureBlack : AppColors.pureWhite,
+                                color: _showingOriginal
+                                    ? AppColors.pureBlack
+                                    : AppColors.pureWhite,
                               ),
                             ),
                           ],
@@ -125,18 +139,28 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
                     left: 16,
                     child: GlassContainer(
                       borderRadius: 20,
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 7,
+                      ),
                       backgroundColor: AppColors.glassBackground,
                       borderColor: AppColors.glassBorder,
                       onTap: _resetToAuto,
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          const Icon(Icons.auto_awesome, size: 12, color: AppColors.pureWhite),
+                          const Icon(
+                            Icons.auto_awesome,
+                            size: 12,
+                            color: AppColors.pureWhite,
+                          ),
                           const SizedBox(width: 6),
                           Text(
                             'RESET AUTO',
-                            style: AppTypography.cameraTelemetry(fontSize: 10, color: AppColors.pureWhite),
+                            style: AppTypography.cameraTelemetry(
+                              fontSize: 10,
+                              color: AppColors.pureWhite,
+                            ),
                           ),
                         ],
                       ),
@@ -179,7 +203,9 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
               backgroundColor: AppColors.pureWhite,
               foregroundColor: AppColors.pureBlack,
               padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 8),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(18),
+              ),
             ),
             child: const Text('SAVE'),
           ),
@@ -215,21 +241,25 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
           gradient: LinearGradient(
             begin: Alignment.topCenter,
             end: Alignment.bottomCenter,
-            colors: [
-              Color(0xFF232526),
-              Color(0xFF0F1012),
-            ],
+            colors: [Color(0xFF232526), Color(0xFF0F1012)],
           ),
         ),
         child: Center(
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(Icons.photo_camera_rounded, size: 52, color: AppColors.grey500.withValues(alpha: 0.6)),
+              Icon(
+                Icons.photo_camera_rounded,
+                size: 52,
+                color: AppColors.grey500.withValues(alpha: 0.6),
+              ),
               const SizedBox(height: 8),
               Text(
                 'CAPTURED SCENE',
-                style: AppTypography.cameraTelemetry(fontSize: 11, color: AppColors.grey400),
+                style: AppTypography.cameraTelemetry(
+                  fontSize: 11,
+                  color: AppColors.grey400,
+                ),
               ),
             ],
           ),
@@ -257,7 +287,9 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
                   radius: 0.9,
                   colors: [
                     Colors.transparent,
-                    AppColors.pureBlack.withValues(alpha: (params.vignette * 0.75).clamp(0.0, 1.0)),
+                    AppColors.pureBlack.withValues(
+                      alpha: (params.vignette * 0.75).clamp(0.0, 1.0),
+                    ),
                   ],
                 ),
               ),
@@ -284,16 +316,8 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
         mainAxisSize: MainAxisSize.min,
         children: [
           _sliderRow(
-            'EXPOSURE',
-            '${_params.exposure >= 0 ? "+" : ""}${_params.exposure.toStringAsFixed(2)} EV',
-            _params.exposure,
-            -1.0,
-            1.0,
-            (v) => setState(() => _params = _params.copyWith(exposure: v)),
-          ),
-          _sliderRow(
             'CONTRAST',
-            '${(_params.contrast * 100).toInt()}%',
+            _signed((_params.contrast - 1.0) * 100),
             _params.contrast,
             0.8,
             1.6,
@@ -301,7 +325,7 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
           ),
           _sliderRow(
             'WARMTH',
-            '${(_params.warmth * 100).toInt()}',
+            _signed(_params.warmth * 100),
             _params.warmth,
             -0.5,
             0.5,
@@ -309,7 +333,7 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
           ),
           _sliderRow(
             'SATURATION',
-            '${(_params.saturation * 100).toInt()}%',
+            _signed((_params.saturation - 1.0) * 100),
             _params.saturation,
             0.5,
             1.8,
@@ -317,7 +341,7 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
           ),
           _sliderRow(
             'VIGNETTE',
-            '${(_params.vignette * 100).toInt()}%',
+            '${(_params.vignette / 0.8 * 100).round()}%',
             _params.vignette,
             0.0,
             0.8,
@@ -344,7 +368,10 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
             width: 82,
             child: Text(
               label,
-              style: AppTypography.cameraTelemetry(fontSize: 10, color: AppColors.grey400),
+              style: AppTypography.cameraTelemetry(
+                fontSize: 10,
+                color: AppColors.grey400,
+              ),
             ),
           ),
           Expanded(
@@ -360,7 +387,10 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
             child: Text(
               valueString,
               textAlign: TextAlign.end,
-              style: AppTypography.cameraTelemetry(fontSize: 10, color: AppColors.grey200),
+              style: AppTypography.cameraTelemetry(
+                fontSize: 10,
+                color: AppColors.grey200,
+              ),
             ),
           ),
         ],
