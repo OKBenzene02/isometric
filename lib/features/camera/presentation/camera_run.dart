@@ -25,7 +25,7 @@ class _CameraRunState extends State<CameraRun> with WidgetsBindingObserver {
 
   // Viewfinder toggles
   bool _showGrid = true;
-  FlashMode _flashMode = FlashMode.auto;
+  FlashMode _flashMode = FlashMode.off;
 
   // Capture & Processing State
   bool _isCapturing = false;
