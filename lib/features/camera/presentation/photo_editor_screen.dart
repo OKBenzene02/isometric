@@ -267,33 +267,21 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
       );
     }
 
-    // 1. Hardware accelerated GPU Color Grading Matrix
+    // 1. Hardware accelerated GPU color grading matrix
     Widget gradedWidget = ColorFiltered(
       colorFilter: ColorFilter.matrix(params.toColorMatrix()),
       child: imageWidget,
     );
 
-    // 2. Subtle Lens Vignette
-    if (params.vignette > 0) {
+    // 2. Subtle lens vignette (shared gradient from DslrParams)
+    final vignette = params.vignetteGradient();
+    if (vignette != null) {
       gradedWidget = Stack(
         fit: StackFit.expand,
         children: [
           gradedWidget,
           IgnorePointer(
-            child: Container(
-              decoration: BoxDecoration(
-                gradient: RadialGradient(
-                  center: Alignment.center,
-                  radius: 0.9,
-                  colors: [
-                    Colors.transparent,
-                    AppColors.pureBlack.withValues(
-                      alpha: (params.vignette * 0.75).clamp(0.0, 1.0),
-                    ),
-                  ],
-                ),
-              ),
-            ),
+            child: DecoratedBox(decoration: BoxDecoration(gradient: vignette)),
           ),
         ],
       );

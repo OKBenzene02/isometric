@@ -1,14 +1,20 @@
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:isometric/common/theme/theme.dart';
-import 'package:isometric/common/widgets/glass_container.dart';
+import 'package:isometric/common/widgets/full_screen_loader.dart';
+import 'package:isometric/features/camera/presentation/camera_permission_screen.dart';
 import 'package:isometric/features/camera/presentation/photo_editor_screen.dart';
+import 'package:isometric/features/camera/presentation/widgets/camera_preview_fill.dart';
+import 'package:isometric/features/camera/presentation/widgets/glass_button.dart';
+import 'package:isometric/features/camera/presentation/widgets/no_permission_view.dart';
+import 'package:isometric/features/camera/presentation/widgets/processing_overlay.dart';
+import 'package:isometric/features/camera/presentation/widgets/shutter_button.dart';
 import 'package:isometric/features/camera/presentation/widgets/simple_grid_overlay.dart';
 
-/// Fullscreen Camera View:
-/// - Real hardware camera access with live fullscreen preview
-/// - Simple Grid ON/OFF toggle
-/// - Responsive capture with loading indicator while transitioning to editor
+/// What the screen is currently showing.
+enum _Status { checking, ready, denied, permanentlyDenied, error }
+
 class CameraRun extends StatefulWidget {
   const CameraRun({super.key});
 
@@ -17,389 +23,362 @@ class CameraRun extends StatefulWidget {
 }
 
 class _CameraRunState extends State<CameraRun> with WidgetsBindingObserver {
-  List<CameraDescription> _cameras = [];
-  CameraController? _cameraController;
-  int _selectedCameraIndex = 0;
-  bool _isCameraInitialized = false;
-  String? _errorMessage;
+  /// Must match CHANNEL in MainActivity.kt.
+  static const _settingsChannel = MethodChannel(
+    'com.example.isometric/app_settings',
+  );
 
-  // Viewfinder toggles
+  // ── State ────────────────────────────────────────────────────────────────
+  _Status _status = _Status.checking;
+  String _errorMessage = '';
+
+  List<CameraDescription> _cameras = [];
+  CameraController? _controller; // null whenever there is no live camera
+  int _cameraIndex = 0;
+
   bool _showGrid = true;
   FlashMode _flashMode = FlashMode.off;
 
-  // Capture & Processing State
   bool _isCapturing = false;
-  bool _isSwitchingCamera = false;
+  bool _isSwitching = false;
 
+  // Permission bookkeeping (the camera plugin asks for permission itself).
+  bool _isStarting = false; // a start is in progress (dialog may be showing)
+  bool _dialogShown = false; // app went inactive during start → dialog appeared
+  int _denialCount = 0; // denials with a dialog; Android blocks after two
+  bool _wentToSettings = false; // retry when the user comes back
+
+  bool get _cameraLive => _controller?.value.isInitialized ?? false;
+
+  // ── Lifecycle ────────────────────────────────────────────────────────────
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _initCamera();
-  }
-
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    final CameraController? controller = _cameraController;
-    if (controller == null || !controller.value.isInitialized) return;
-
-    if (state == AppLifecycleState.inactive) {
-      controller.dispose();
-    } else if (state == AppLifecycleState.resumed) {
-      _initCameraController(controller.description);
-    }
+    _startCamera();
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _cameraController?.dispose();
+    _controller?.dispose();
     super.dispose();
   }
 
-  Future<void> _initCamera() async {
-    try {
-      _cameras = await availableCameras();
-      if (_cameras.isNotEmpty) {
-        await _initCameraController(_cameras[_selectedCameraIndex]);
-      } else {
-        setState(() {
-          _errorMessage = 'No camera found on this device.';
-        });
-      }
-    } catch (e) {
-      setState(() {
-        _errorMessage = 'Camera permission required or device unavailable.\n($e)';
-      });
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // While starting, the permission dialog fires inactive/resumed.
+    // Remember that a dialog appeared, but don't react to it.
+    if (_isStarting) {
+      if (state == AppLifecycleState.inactive) _dialogShown = true;
+      return;
+    }
+
+    if (state == AppLifecycleState.inactive && _status == _Status.ready) {
+      _releaseCamera();
+    } else if (state == AppLifecycleState.resumed) {
+      _onResumed();
     }
   }
 
-  Future<void> _initCameraController(CameraDescription description) async {
-    final oldController = _cameraController;
+  Future<void> _onResumed() async {
+    if (_status == _Status.ready) {
+      await _startCamera();
+    } else if (_wentToSettings) {
+      // Back from Settings: try again (no loop — only after a Settings trip).
+      _wentToSettings = false;
+      _denialCount = 0;
+      await _startCamera();
+    }
+  }
+
+  // ── Permission ───────────────────────────────────────────────────────────
+  Future<void> _onPermissionRetry() async {
+    if (_status == _Status.permanentlyDenied) {
+      await _openAppSettings();
+    } else {
+      await _startCamera();
+    }
+  }
+
+  Future<void> _openAppSettings() async {
+    try {
+      _wentToSettings = true;
+      await _settingsChannel.invokeMethod('openAppSettings');
+    } on PlatformException catch (_) {
+      _wentToSettings = false;
+      _showError('Open Settings → Apps → Isometric → Permissions → Camera.');
+    } on MissingPluginException catch (_) {
+      // No native handler on this platform (e.g. iOS).
+      _wentToSettings = false;
+      _showError('Open Settings → Isometric and allow Camera access.');
+    }
+  }
+
+  // ── Camera start / stop ──────────────────────────────────────────────────
+  void _releaseCamera() {
+    final old = _controller;
+    _controller = null;
+    old?.dispose();
+    if (mounted) setState(() {});
+  }
+
+  /// The single entry point: asks for permission (through the camera plugin)
+  /// and starts the preview.
+  Future<void> _startCamera([CameraDescription? camera]) async {
+    if (_isStarting) return;
+    _isStarting = true;
+    _dialogShown = false;
+
+    // Detach the old controller first so the UI never uses a disposed one.
+    final old = _controller;
     if (mounted) {
       setState(() {
-        _isCameraInitialized = false;
+        _controller = null;
+        // Spinner (not the permission screen) while the dialog is up.
+        if (_status != _Status.ready) _status = _Status.checking;
       });
     }
-    await oldController?.dispose();
-
-    final controller = CameraController(
-      description,
-      ResolutionPreset.max,
-      enableAudio: false,
-    );
+    await old?.dispose();
 
     try {
-      await controller.initialize();
+      if (_cameras.isEmpty) _cameras = await availableCameras();
+      if (_cameras.isEmpty) {
+        _showError('No camera found on this device.');
+        return;
+      }
 
-      // Front cameras typically do not support flash. Safely apply flash mode.
+      final controller = CameraController(
+        camera ?? _cameras[_cameraIndex],
+        ResolutionPreset.max,
+        enableAudio: false,
+      );
+
+      try {
+        await controller.initialize(); // shows the permission dialog if needed
+      } catch (_) {
+        await controller.dispose();
+        rethrow;
+      }
+
       try {
         await controller.setFlashMode(_flashMode);
       } catch (_) {
-        _flashMode = FlashMode.off;
+        _flashMode = FlashMode.off; // e.g. front camera has no flash
       }
 
-      if (mounted) {
-        setState(() {
-          _cameraController = controller;
-          _isCameraInitialized = true;
-          _errorMessage = null;
-        });
+      if (!mounted) {
+        await controller.dispose();
+        return;
       }
+      _denialCount = 0;
+      setState(() {
+        _controller = controller;
+        _status = _Status.ready;
+      });
+    } on CameraException catch (e) {
+      _onCameraException(e);
     } catch (e) {
-      if (mounted) {
-        setState(() {
-          _errorMessage = 'Failed to initialize camera: $e';
-        });
-      }
+      _showError('Failed to start the camera: $e');
+    } finally {
+      _isStarting = false;
     }
   }
 
-  Future<void> _switchCamera() async {
-    if (_cameras.length <= 1 || _isCapturing || _isSwitchingCamera) return;
+  void _onCameraException(CameraException e) {
+    debugPrint('CameraException: ${e.code} — ${e.description}');
+    if (!mounted) return;
 
-    setState(() => _isSwitchingCamera = true);
-
-    try {
-      // Find current lens direction (defaults to back)
-      final currentDirection = _cameraController?.description.lensDirection ?? CameraLensDirection.back;
-      final targetDirection = currentDirection == CameraLensDirection.back
-          ? CameraLensDirection.front
-          : CameraLensDirection.back;
-
-      // Find camera matching the target direction
-      CameraDescription? newCamera;
-      for (final cam in _cameras) {
-        if (cam.lensDirection == targetDirection) {
-          newCamera = cam;
-          break;
-        }
-      }
-
-      // Fallback if no exact match found: pick the next different camera
-      newCamera ??= _cameras.firstWhere(
-        (c) => c.lensDirection != currentDirection,
-        orElse: () => _cameras[(_selectedCameraIndex + 1) % _cameras.length],
-      );
-
-      _selectedCameraIndex = _cameras.indexOf(newCamera);
-      await _initCameraController(newCamera);
-    } catch (e) {
-      debugPrint('Error switching camera: $e');
-    } finally {
-      if (mounted) {
-        setState(() => _isSwitchingCamera = false);
-      }
+    final denied =
+        e.code.contains('AccessDenied') || e.code.contains('AccessRestricted');
+    if (!denied) {
+      _showError('Camera error: ${e.description}');
+      return;
     }
+
+    _denialCount++;
+    // Permanent if the plugin says so, if no dialog appeared this time
+    // (Android no longer asks), or after two denials.
+    final permanent = e.code.contains('WithoutPrompt') ||
+        e.code.contains('Restricted') ||
+        !_dialogShown ||
+        _denialCount >= 2;
+
+    setState(() {
+      _status = permanent ? _Status.permanentlyDenied : _Status.denied;
+    });
+  }
+
+  void _showError(String message) {
+    if (!mounted) return;
+    setState(() {
+      _status = _Status.error;
+      _errorMessage = message;
+    });
+  }
+
+  // ── Actions ──────────────────────────────────────────────────────────────
+  Future<void> _switchCamera() async {
+    if (_cameras.length <= 1 || _isCapturing || _isSwitching) return;
+    setState(() => _isSwitching = true);
+
+    final current = _cameras[_cameraIndex].lensDirection;
+    final target = current == CameraLensDirection.back
+        ? CameraLensDirection.front
+        : CameraLensDirection.back;
+
+    final index = _cameras.indexWhere((c) => c.lensDirection == target);
+    _cameraIndex = index >= 0 ? index : (_cameraIndex + 1) % _cameras.length;
+
+    await _startCamera(_cameras[_cameraIndex]);
+    if (mounted) setState(() => _isSwitching = false);
   }
 
   Future<void> _toggleFlash() async {
-    if (_cameraController == null || !_cameraController!.value.isInitialized || _isCapturing || _isSwitchingCamera) return;
+    final controller = _controller;
+    if (controller == null || !_cameraLive || _isCapturing) return;
 
-    final nextMode = switch (_flashMode) {
+    final next = switch (_flashMode) {
       FlashMode.off => FlashMode.auto,
       FlashMode.auto => FlashMode.always,
       _ => FlashMode.off,
     };
 
     try {
-      await _cameraController!.setFlashMode(nextMode);
-      setState(() => _flashMode = nextMode);
+      await controller.setFlashMode(next);
+      setState(() => _flashMode = next);
     } catch (_) {
       setState(() => _flashMode = FlashMode.off);
     }
   }
 
   Future<void> _capturePhoto() async {
-    if (_isCapturing) return;
+    final controller = _controller;
+    if (_isCapturing || controller == null || !_cameraLive) return;
 
-    // Show processing loader immediately
     setState(() => _isCapturing = true);
-
-    String? capturedPath;
-
-    if (_cameraController != null && _cameraController!.value.isInitialized) {
-      try {
-        final XFile file = await _cameraController!.takePicture();
-        capturedPath = file.path;
-      } catch (e) {
-        debugPrint('Capture error: $e');
-      }
-    }
-
-    if (!mounted) return;
-
-    // Navigate to DSLR Editor Screen with the captured picture
-    await Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => PhotoEditorScreen(imagePath: capturedPath),
-      ),
-    );
-
-    // Hide loader when returning back to camera
-    if (mounted) {
-      setState(() => _isCapturing = false);
+    try {
+      final file = await controller.takePicture();
+      if (!mounted) return;
+      await Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => PhotoEditorScreen(imagePath: file.path),
+        ),
+      );
+    } catch (e) {
+      debugPrint('Capture error: $e');
+    } finally {
+      if (mounted) setState(() => _isCapturing = false);
     }
   }
 
+  // ── UI ───────────────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
+    switch (_status) {
+      case _Status.checking:
+        return const FullScreenLoader();
+
+      case _Status.denied:
+      case _Status.permanentlyDenied:
+        return CameraPermissionScreen(
+          isPermanentlyDenied: _status == _Status.permanentlyDenied,
+          onRetry: _onPermissionRetry,
+        );
+
+      case _Status.error:
+        return NoPermissionView(
+          message: _errorMessage,
+          onRetry: _startCamera,
+        );
+
+      case _Status.ready:
+        return _buildCameraScreen();
+    }
+  }
+
+  Widget _buildCameraScreen() {
+    final controller = _controller;
+
+    // Camera is still starting (or restarting after a flip / resume).
+    if (controller == null || !_cameraLive) {
+      return const FullScreenLoader();
+    }
+
     return Scaffold(
       backgroundColor: AppColors.pureBlack,
       body: Stack(
         fit: StackFit.expand,
         children: [
-          // 1. Fullscreen Camera Viewport
-          _buildCameraPreview(),
-
-          // 2. Simple Camera Grid (ON/OFF)
+          CameraPreviewFill(controller: controller),
           SimpleGridOverlay(isVisible: _showGrid),
-
-          // 3. Clean Top Bar: Grid & Flash Toggles
-          Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            child: SafeArea(
-              bottom: false,
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    // Grid Toggle Button (ON / OFF)
-                    GlassContainer(
-                      shape: BoxShape.circle,
-                      padding: const EdgeInsets.all(10),
-                      backgroundColor: _showGrid ? AppColors.pureWhite : AppColors.glassBackground,
-                      borderColor: _showGrid ? AppColors.pureWhite : AppColors.glassBorder,
-                      onTap: () => setState(() => _showGrid = !_showGrid),
-                      child: Icon(
-                        _showGrid ? Icons.grid_on_rounded : Icons.grid_off_rounded,
-                        size: 20,
-                        color: _showGrid ? AppColors.pureBlack : AppColors.pureWhite,
-                      ),
-                    ),
-
-                    // Flash Toggle Button
-                    GlassContainer(
-                      shape: BoxShape.circle,
-                      padding: const EdgeInsets.all(10),
-                      backgroundColor: _flashMode != FlashMode.off ? AppColors.pureWhite : AppColors.glassBackground,
-                      borderColor: _flashMode != FlashMode.off ? AppColors.pureWhite : AppColors.glassBorder,
-                      onTap: _toggleFlash,
-                      child: Icon(
-                        _flashIcon(_flashMode),
-                        size: 20,
-                        color: _flashMode != FlashMode.off ? AppColors.pureBlack : AppColors.pureWhite,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-
-          // 4. Clean Bottom Bar: Shutter & Camera Flip
-          Positioned(
-            bottom: 0,
-            left: 0,
-            right: 0,
-            child: SafeArea(
-              top: false,
-              child: Padding(
-                padding: const EdgeInsets.only(bottom: 28, left: 32, right: 32),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    // Left spacer
-                    const SizedBox(width: 48),
-
-                    // Main Capture Shutter Button
-                    _ShutterButton(
-                      isProcessing: _isCapturing,
-                      onTap: _capturePhoto,
-                    ),
-
-                    // Camera Switch (Front/Back)
-                    if (_cameras.length > 1)
-                      GlassContainer(
-                        shape: BoxShape.circle,
-                        padding: const EdgeInsets.all(12),
-                        backgroundColor: AppColors.glassBackground,
-                        borderColor: AppColors.glassBorder,
-                        onTap: _isSwitchingCamera || _isCapturing ? null : _switchCamera,
-                        child: _isSwitchingCamera
-                            ? const SizedBox(
-                                width: 22,
-                                height: 22,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  color: AppColors.pureWhite,
-                                ),
-                              )
-                            : const Icon(
-                                Icons.flip_camera_ios_rounded,
-                                size: 22,
-                                color: AppColors.pureWhite,
-                              ),
-                      )
-                    else
-                      const SizedBox(width: 48),
-                  ],
-                ),
-              ),
-            ),
-          ),
-
-          // 5. Sleek Loading Indicator while processing capture & navigating
-          if (_isCapturing)
-            Container(
-              color: AppColors.pureBlack.withValues(alpha: 0.5),
-              child: Center(
-                child: GlassContainer(
-                  borderRadius: 24,
-                  padding: const EdgeInsets.symmetric(horizontal: 26, vertical: 20),
-                  backgroundColor: AppColors.glassBackground,
-                  borderColor: AppColors.glassBorderHighlight,
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const SizedBox(
-                        width: 32,
-                        height: 32,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2.8,
-                          color: AppColors.pureWhite,
-                        ),
-                      ),
-                      const SizedBox(height: 14),
-                      Text(
-                        'PROCESSING PHOTO...',
-                        style: AppTypography.cameraTelemetry(
-                          fontSize: 11,
-                          letterSpacing: 1.5,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
+          _buildTopBar(),
+          _buildBottomBar(),
+          if (_isCapturing) const ProcessingOverlay(),
         ],
       ),
     );
   }
 
-  Widget _buildCameraPreview() {
-    if (_errorMessage != null) {
-      return Center(
+  Widget _buildTopBar() {
+    final flashOn = _flashMode != FlashMode.off;
+
+    return Positioned(
+      top: 0,
+      left: 0,
+      right: 0,
+      child: SafeArea(
+        bottom: false,
         child: Padding(
-          padding: const EdgeInsets.all(32),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Icon(Icons.videocam_off_rounded, size: 54, color: AppColors.grey500),
-              const SizedBox(height: 16),
-              Text(
-                _errorMessage!,
-                textAlign: TextAlign.center,
-                style: AppTypography.cameraTelemetry(fontSize: 13, color: AppColors.grey300),
+              GlassIconButton(
+                icon: _showGrid ? Icons.grid_on_rounded : Icons.grid_off_rounded,
+                active: _showGrid,
+                onTap: () => setState(() => _showGrid = !_showGrid),
               ),
-              const SizedBox(height: 16),
-              FilledButton(
-                onPressed: _initCamera,
-                child: const Text('RETRY CAMERA ACCESS'),
+              GlassIconButton(
+                icon: _flashIcon(_flashMode),
+                active: flashOn,
+                onTap: _toggleFlash,
               ),
             ],
           ),
         ),
-      );
-    }
+      ),
+    );
+  }
 
-    if (!_isCameraInitialized || _cameraController == null) {
-      return const Center(
-        child: CircularProgressIndicator(color: AppColors.pureWhite, strokeWidth: 2),
-      );
-    }
-
-    // Fullscreen Camera Feed filling the screen properly
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final size = constraints.biggest;
-        var scale = size.aspectRatio * _cameraController!.value.aspectRatio;
-        if (scale < 1) scale = 1 / scale;
-
-        return ClipRect(
-          child: Transform.scale(
-            scale: scale,
-            child: Center(
-              child: CameraPreview(_cameraController!),
-            ),
+  Widget _buildBottomBar() {
+    return Positioned(
+      bottom: 0,
+      left: 0,
+      right: 0,
+      child: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.only(bottom: 28, left: 32, right: 32),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const SizedBox(width: 48), // keeps the shutter centered
+              ShutterButton(isProcessing: _isCapturing, onTap: _capturePhoto),
+              if (_cameras.length > 1)
+                GlassIconButton(
+                  icon: Icons.flip_camera_ios_rounded,
+                  padding: 12,
+                  iconSize: 22,
+                  loading: _isSwitching,
+                  onTap: (_isSwitching || _isCapturing) ? null : _switchCamera,
+                )
+              else
+                const SizedBox(width: 48),
+            ],
           ),
-        );
-      },
+        ),
+      ),
     );
   }
 
@@ -413,97 +392,5 @@ class _CameraRunState extends State<CameraRun> with WidgetsBindingObserver {
       case FlashMode.torch:
         return Icons.flash_on_rounded;
     }
-  }
-}
-
-class _ShutterButton extends StatefulWidget {
-  final bool isProcessing;
-  final VoidCallback onTap;
-
-  const _ShutterButton({
-    required this.isProcessing,
-    required this.onTap,
-  });
-
-  @override
-  State<_ShutterButton> createState() => _ShutterButtonState();
-}
-
-class _ShutterButtonState extends State<_ShutterButton> with SingleTickerProviderStateMixin {
-  late final AnimationController _controller;
-  late final Animation<double> _scaleAnimation;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 100),
-      reverseDuration: const Duration(milliseconds: 140),
-    );
-    _scaleAnimation = Tween<double>(begin: 1.0, end: 0.90).animate(
-      CurvedAnimation(parent: _controller, curve: Curves.easeInOut),
-    );
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTapDown: (_) {
-        if (!widget.isProcessing) _controller.forward();
-      },
-      onTapUp: (_) {
-        if (!widget.isProcessing) {
-          _controller.reverse();
-          widget.onTap();
-        }
-      },
-      onTapCancel: () {
-        if (!widget.isProcessing) _controller.reverse();
-      },
-      child: ScaleTransition(
-        scale: _scaleAnimation,
-        child: Container(
-          width: 78,
-          height: 78,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            border: Border.all(color: AppColors.pureWhite, width: 3.5),
-            boxShadow: const [
-              BoxShadow(
-                color: AppColors.glassShadow,
-                blurRadius: 18,
-                spreadRadius: 2,
-              ),
-            ],
-          ),
-          padding: const EdgeInsets.all(5),
-          child: Container(
-            decoration: const BoxDecoration(
-              shape: BoxShape.circle,
-              color: AppColors.pureWhite,
-            ),
-            child: widget.isProcessing
-                ? const Center(
-                    child: SizedBox(
-                      width: 24,
-                      height: 24,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2.5,
-                        color: AppColors.pureBlack,
-                      ),
-                    ),
-                  )
-                : null,
-          ),
-        ),
-      ),
-    );
   }
 }
