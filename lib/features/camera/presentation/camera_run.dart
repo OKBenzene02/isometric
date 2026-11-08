@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:isometric/common/theme/theme.dart';
 import 'package:isometric/common/widgets/full_screen_loader.dart';
+import 'package:isometric/features/camera/domain/camera_profiles.dart';
 import 'package:isometric/features/camera/presentation/camera_permission_screen.dart';
 import 'package:isometric/features/camera/presentation/photo_editor_screen.dart';
 import 'package:isometric/features/camera/presentation/widgets/camera_preview_fill.dart';
@@ -36,6 +37,20 @@ class _CameraRunState extends State<CameraRun> with WidgetsBindingObserver {
   CameraController? _controller; // null whenever there is no live camera
   int _cameraIndex = 0;
 
+  // Camera discovery
+  final List<CameraProfile> _cameraProfiles = [];
+  bool _hasDiscoveredCameras = false;
+
+  int? _mainRearCameraIndex;
+  int? _wideRearCameraIndex; // null when the device has no real wide lens
+  int? _frontCameraIndex;
+  double _wideMinZoom = 1.0; // zoom level of the wide view (e.g. 0.6)
+
+  bool _isFrontCamera = false;
+
+  // Zoom UI
+  bool _showZoomSlider = false;
+
   bool _showGrid = true;
   FlashMode _flashMode = FlashMode.off;
 
@@ -53,6 +68,30 @@ class _CameraRunState extends State<CameraRun> with WidgetsBindingObserver {
   double _minZoom = 1.0;
   double _maxZoom = 1.0;
   double _currentZoom = 1.0;
+
+  // ── Derived lens state (single source of truth: no separate flag) ───────
+  /// Wide lens is its own camera ID (otherwise it is the main camera zoomed out).
+  bool get _wideIsSeparateCamera =>
+      _wideRearCameraIndex != null &&
+      _wideRearCameraIndex != _mainRearCameraIndex;
+
+  bool get _hasWideAngle =>
+      !_isFrontCamera &&
+      _mainRearCameraIndex != null &&
+      _wideRearCameraIndex != null;
+
+  bool get _isWideActive {
+    if (!_hasWideAngle) return false;
+    return _wideIsSeparateCamera
+        ? _cameraIndex == _wideRearCameraIndex
+        : _currentZoom < 0.95;
+  }
+
+  bool get _isOneXActive =>
+      !_isWideActive && (_currentZoom - 1.0).abs() < 0.05;
+
+  String get _wideLabel =>
+      _wideIsSeparateCamera ? 'Wide' : '${_wideMinZoom.toStringAsFixed(1)}x';
 
   // ── Lifecycle ────────────────────────────────────────────────────────────
   @override
@@ -135,22 +174,31 @@ class _CameraRunState extends State<CameraRun> with WidgetsBindingObserver {
     _dialogShown = false;
 
     // Detach the old controller first so the UI never uses a disposed one.
+    // While the status stays `ready`, the controls remain on screen over a
+    // black preview — no full-screen loader on lens switches.
     final old = _controller;
     if (mounted) {
       setState(() {
         _controller = null;
-        // Spinner (not the permission screen) while the dialog is up.
+        // Spinner (not the permission screen) only while the dialog is up.
         if (_status != _Status.ready) _status = _Status.checking;
       });
     }
     await old?.dispose();
 
     try {
-      if (_cameras.isEmpty) _cameras = await availableCameras();
+      if (_cameras.isEmpty) {
+        _cameras = await availableCameras();
+      }
+
       if (_cameras.isEmpty) {
         _showError('No camera found on this device.');
         return;
       }
+
+      // Discover cameras only once (this is also where the permission dialog
+      // first appears, so denial is handled by the catch below).
+      await _discoverCameras();
 
       final controller = CameraController(
         camera ?? _cameras[_cameraIndex],
@@ -169,8 +217,9 @@ class _CameraRunState extends State<CameraRun> with WidgetsBindingObserver {
         _minZoom = await controller.getMinZoomLevel();
         _maxZoom = await controller.getMaxZoomLevel();
 
-        _currentZoom = 1.0.clamp(_minZoom, _maxZoom).toDouble();
-
+        // Keep the zoom the user had (e.g. wide) across resume; reset it to
+        // 1.0 on lens/camera switches by setting _currentZoom before calling.
+        _currentZoom = _currentZoom.clamp(_minZoom, _maxZoom).toDouble();
         await controller.setZoomLevel(_currentZoom);
       } catch (e) {
         debugPrint('Zoom initialization failed: $e');
@@ -238,18 +287,22 @@ class _CameraRunState extends State<CameraRun> with WidgetsBindingObserver {
 
   // ── Actions ──────────────────────────────────────────────────────────────
   Future<void> _switchCamera() async {
-    if (_cameras.length <= 1 || _isCapturing || _isSwitching) return;
+    if (_isCapturing || _isSwitching) return;
+
+    final targetIndex = _isFrontCamera
+        ? _mainRearCameraIndex
+        : _frontCameraIndex;
+
+    if (targetIndex == null) return;
+
     setState(() => _isSwitching = true);
 
-    final current = _cameras[_cameraIndex].lensDirection;
-    final target = current == CameraLensDirection.back
-        ? CameraLensDirection.front
-        : CameraLensDirection.back;
-
-    final index = _cameras.indexWhere((c) => c.lensDirection == target);
-    _cameraIndex = index >= 0 ? index : (_cameraIndex + 1) % _cameras.length;
+    _isFrontCamera = !_isFrontCamera;
+    _cameraIndex = targetIndex;
+    _currentZoom = 1.0; // always start a new camera at 1x
 
     await _startCamera(_cameras[_cameraIndex]);
+
     if (mounted) setState(() => _isSwitching = false);
   }
 
@@ -291,6 +344,40 @@ class _CameraRunState extends State<CameraRun> with WidgetsBindingObserver {
     }
   }
 
+  /// Sets the zoom without restarting the camera.
+  Future<void> _setZoom(double zoom) async {
+    final controller = _controller;
+    if (controller == null || !_cameraLive) return;
+
+    final target = zoom.clamp(_minZoom, _maxZoom).toDouble();
+    try {
+      await controller.setZoomLevel(target);
+      if (mounted) setState(() => _currentZoom = target);
+    } catch (e) {
+      debugPrint('Zoom failed: $e');
+    }
+  }
+
+  /// Wide (true) or normal 1x (false).
+  /// - Logical camera (one ID that can zoom below 1x): only changes the zoom,
+  ///   so there is no restart and no loader.
+  /// - Separate wide camera ID: switches camera.
+  Future<void> _selectWide(bool wide) async {
+    if (!_hasWideAngle || _isCapturing || _isSwitching) return;
+    if (wide == _isWideActive) return;
+
+    if (_wideIsSeparateCamera) {
+      final target = wide ? _wideRearCameraIndex! : _mainRearCameraIndex!;
+      setState(() => _isSwitching = true);
+      _cameraIndex = target;
+      _currentZoom = 1.0;
+      await _startCamera(_cameras[target]);
+      if (mounted) setState(() => _isSwitching = false);
+    } else {
+      await _setZoom(wide ? _wideMinZoom : 1.0);
+    }
+  }
+
   // ── UI ───────────────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
@@ -315,29 +402,30 @@ class _CameraRunState extends State<CameraRun> with WidgetsBindingObserver {
 
   Widget _buildCameraScreen() {
     final controller = _controller;
+    final live = controller != null && _cameraLive;
 
-    // Camera is still starting (or restarting after a flip / resume).
-    if (controller == null || !_cameraLive) {
-      return const FullScreenLoader();
-    }
-
+    // The screen (controls included) stays on screen when the camera restarts;
+    // only the preview area goes black for a moment. No full-screen loader.
     return Scaffold(
       backgroundColor: AppColors.pureBlack,
       body: Stack(
         fit: StackFit.expand,
         children: [
-          GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTapDown: (details) => _focusOnTap(details, context),
-            child: CameraPreviewFill(controller: controller),
-          ),
+          if (live)
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTapDown: (details) => _focusOnTap(details, context),
+              child: CameraPreviewFill(controller: controller),
+            )
+          else
+            const ColoredBox(color: AppColors.pureBlack),
           SimpleGridOverlay(isVisible: _showGrid),
           _buildTopBar(),
           Positioned(
             left: 30,
             right: 30,
-            bottom: 150,
-            child: _buildZoomSlider(),
+            bottom: 145,
+            child: _buildZoomControls(),
           ),
           _buildBottomBar(),
           if (_isCapturing) const ProcessingOverlay(),
@@ -380,6 +468,8 @@ class _CameraRunState extends State<CameraRun> with WidgetsBindingObserver {
   }
 
   Widget _buildBottomBar() {
+    final canFlip = _frontCameraIndex != null && _mainRearCameraIndex != null;
+
     return Positioned(
       bottom: 0,
       left: 0,
@@ -393,7 +483,7 @@ class _CameraRunState extends State<CameraRun> with WidgetsBindingObserver {
             children: [
               const SizedBox(width: 48), // keeps the shutter centered
               ShutterButton(isProcessing: _isCapturing, onTap: _capturePhoto),
-              if (_cameras.length > 1)
+              if (canFlip)
                 GlassIconButton(
                   icon: Icons.flip_camera_ios_rounded,
                   padding: 12,
@@ -425,13 +515,7 @@ class _CameraRunState extends State<CameraRun> with WidgetsBindingObserver {
           min: _minZoom,
           max: _maxZoom,
           value: _currentZoom.clamp(_minZoom, _maxZoom),
-          onChanged: (value) async {
-            setState(() {
-              _currentZoom = value;
-            });
-
-            await _controller?.setZoomLevel(value);
-          },
+          onChanged: _cameraLive ? _setZoom : null,
           activeColor: Colors.white,
           inactiveColor: Colors.white38,
         ),
@@ -462,6 +546,185 @@ class _CameraRunState extends State<CameraRun> with WidgetsBindingObserver {
     } catch (e) {
       debugPrint('Focus failed: $e');
     }
+  }
+
+  Widget _lensPill(String label, bool active, VoidCallback? onTap) {
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+        decoration: BoxDecoration(
+          color: active ? Colors.white : Colors.black45,
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: active ? Colors.black : Colors.white,
+            fontWeight: FontWeight.w700,
+            fontSize: 13,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildZoomControls() {
+    final busy = _isSwitching || _isCapturing;
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            if (_hasWideAngle) ...[
+              _lensPill(
+                _wideLabel,
+                _isWideActive,
+                busy ? null : () => _selectWide(true),
+              ),
+              const SizedBox(width: 8),
+              _lensPill(
+                '1x',
+                _isOneXActive,
+                busy ? null : () => _selectWide(false),
+              ),
+              const SizedBox(width: 12),
+            ],
+            IconButton(
+              onPressed: () {
+                setState(() {
+                  _showZoomSlider = !_showZoomSlider;
+                });
+              },
+              icon: Icon(
+                _showZoomSlider ? Icons.zoom_out : Icons.zoom_in,
+                color: Colors.white,
+              ),
+              style: IconButton.styleFrom(backgroundColor: Colors.black45),
+            ),
+          ],
+        ),
+
+        if (_showZoomSlider) ...[const SizedBox(height: 8), _buildZoomSlider()],
+      ],
+    );
+  }
+
+  Future<void> _discoverCameras() async {
+    if (_hasDiscoveredCameras) return;
+
+    _cameraProfiles.clear();
+
+    for (int i = 0; i < _cameras.length; i++) {
+      final camera = _cameras[i];
+
+      CameraController? testController;
+
+      try {
+        testController = CameraController(
+          camera,
+          ResolutionPreset.max,
+          enableAudio: false,
+        );
+
+        await testController.initialize();
+
+        final minZoom = await testController.getMinZoomLevel();
+        final maxZoom = await testController.getMaxZoomLevel();
+
+        final profile = CameraProfile(
+          index: i,
+          camera: camera,
+          minZoom: minZoom,
+          maxZoom: maxZoom,
+          previewSize: testController.value.previewSize,
+        );
+
+        _cameraProfiles.add(profile);
+
+        debugPrint('''
+========== CAMERA PROFILE ==========
+ID: ${camera.name}
+Direction: ${camera.lensDirection}
+Min zoom: $minZoom
+Max zoom: $maxZoom
+Preview: ${profile.previewSize}
+Resolution pixels: ${profile.resolutionPixels}
+====================================
+''');
+      } on CameraException catch (e) {
+        // Permission problems must reach _startCamera, otherwise discovery
+        // would silently "finish" empty and never run again.
+        if (e.code.contains('AccessDenied') ||
+            e.code.contains('AccessRestricted')) {
+          rethrow;
+        }
+        debugPrint('Camera ${camera.name} discovery failed: $e');
+      } catch (e) {
+        debugPrint('Camera ${camera.name} discovery failed: $e');
+      } finally {
+        await testController?.dispose();
+      }
+    }
+
+    // Find rear cameras.
+    final rearProfiles = _cameraProfiles
+        .where(
+          (profile) => profile.camera.lensDirection == CameraLensDirection.back,
+        )
+        .toList();
+
+    // Find front camera.
+    final frontProfiles = _cameraProfiles
+        .where(
+          (profile) =>
+              profile.camera.lensDirection == CameraLensDirection.front,
+        )
+        .toList();
+
+    if (rearProfiles.isNotEmpty) {
+      // Main camera = highest preview resolution.
+      final mainCamera = rearProfiles.reduce(
+        (a, b) => a.resolutionPixels >= b.resolutionPixels ? a : b,
+      );
+
+      _mainRearCameraIndex = mainCamera.index;
+
+      // Wide candidate = rear camera with the lowest minimum zoom.
+      final wideCamera = rearProfiles.reduce(
+        (a, b) => a.minZoom <= b.minZoom ? a : b,
+      );
+
+      // Only treat it as wide if it really is: it zooms out below 1x, or it
+      // reaches a lower zoom than the main camera. Otherwise there is no wide
+      // lens we can reach, so the Wide / 1x buttons stay hidden.
+      final isReallyWide =
+          wideCamera.minZoom < 0.95 ||
+          wideCamera.minZoom < mainCamera.minZoom - 0.05;
+
+      _wideRearCameraIndex = isReallyWide ? wideCamera.index : null;
+      _wideMinZoom = wideCamera.minZoom;
+
+      _cameraIndex = mainCamera.index;
+
+      debugPrint('MAIN CAMERA: ${mainCamera.camera.name}');
+      debugPrint(
+        isReallyWide
+            ? 'WIDE CAMERA: ${wideCamera.camera.name} (min zoom ${wideCamera.minZoom})'
+            : 'NO WIDE CAMERA FOUND',
+      );
+    }
+
+    if (frontProfiles.isNotEmpty) {
+      _frontCameraIndex = frontProfiles.first.index;
+    }
+
+    // Only mark as done when something was found, so a failed first attempt
+    // (e.g. permission denied) is retried next time.
+    _hasDiscoveredCameras = _cameraProfiles.isNotEmpty;
   }
 
   IconData _flashIcon(FlashMode mode) {
