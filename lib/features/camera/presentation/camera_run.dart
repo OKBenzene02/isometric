@@ -50,6 +50,10 @@ class _CameraRunState extends State<CameraRun> with WidgetsBindingObserver {
 
   bool get _cameraLive => _controller?.value.isInitialized ?? false;
 
+  double _minZoom = 1.0;
+  double _maxZoom = 1.0;
+  double _currentZoom = 1.0;
+
   // ── Lifecycle ────────────────────────────────────────────────────────────
   @override
   void initState() {
@@ -162,6 +166,20 @@ class _CameraRunState extends State<CameraRun> with WidgetsBindingObserver {
       }
 
       try {
+        _minZoom = await controller.getMinZoomLevel();
+        _maxZoom = await controller.getMaxZoomLevel();
+
+        _currentZoom = 1.0.clamp(_minZoom, _maxZoom).toDouble();
+
+        await controller.setZoomLevel(_currentZoom);
+      } catch (e) {
+        debugPrint('Zoom initialization failed: $e');
+        _minZoom = 1.0;
+        _maxZoom = 1.0;
+        _currentZoom = 1.0;
+      }
+
+      try {
         await controller.setFlashMode(_flashMode);
       } catch (_) {
         _flashMode = FlashMode.off; // e.g. front camera has no flash
@@ -199,7 +217,8 @@ class _CameraRunState extends State<CameraRun> with WidgetsBindingObserver {
     _denialCount++;
     // Permanent if the plugin says so, if no dialog appeared this time
     // (Android no longer asks), or after two denials.
-    final permanent = e.code.contains('WithoutPrompt') ||
+    final permanent =
+        e.code.contains('WithoutPrompt') ||
         e.code.contains('Restricted') ||
         !_dialogShown ||
         _denialCount >= 2;
@@ -287,10 +306,7 @@ class _CameraRunState extends State<CameraRun> with WidgetsBindingObserver {
         );
 
       case _Status.error:
-        return NoPermissionView(
-          message: _errorMessage,
-          onRetry: _startCamera,
-        );
+        return NoPermissionView(message: _errorMessage, onRetry: _startCamera);
 
       case _Status.ready:
         return _buildCameraScreen();
@@ -310,9 +326,19 @@ class _CameraRunState extends State<CameraRun> with WidgetsBindingObserver {
       body: Stack(
         fit: StackFit.expand,
         children: [
-          CameraPreviewFill(controller: controller),
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTapDown: (details) => _focusOnTap(details, context),
+            child: CameraPreviewFill(controller: controller),
+          ),
           SimpleGridOverlay(isVisible: _showGrid),
           _buildTopBar(),
+          Positioned(
+            left: 30,
+            right: 30,
+            bottom: 150,
+            child: _buildZoomSlider(),
+          ),
           _buildBottomBar(),
           if (_isCapturing) const ProcessingOverlay(),
         ],
@@ -335,7 +361,9 @@ class _CameraRunState extends State<CameraRun> with WidgetsBindingObserver {
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               GlassIconButton(
-                icon: _showGrid ? Icons.grid_on_rounded : Icons.grid_off_rounded,
+                icon: _showGrid
+                    ? Icons.grid_on_rounded
+                    : Icons.grid_off_rounded,
                 active: _showGrid,
                 onTap: () => setState(() => _showGrid = !_showGrid),
               ),
@@ -380,6 +408,60 @@ class _CameraRunState extends State<CameraRun> with WidgetsBindingObserver {
         ),
       ),
     );
+  }
+
+  Widget _buildZoomSlider() {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          '${_currentZoom.toStringAsFixed(1)}x',
+          style: const TextStyle(
+            color: Colors.white,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        Slider(
+          min: _minZoom,
+          max: _maxZoom,
+          value: _currentZoom.clamp(_minZoom, _maxZoom),
+          onChanged: (value) async {
+            setState(() {
+              _currentZoom = value;
+            });
+
+            await _controller?.setZoomLevel(value);
+          },
+          activeColor: Colors.white,
+          inactiveColor: Colors.white38,
+        ),
+      ],
+    );
+  }
+
+  // ── Tap to focus ─────────────────────────────────────
+  Future<void> _focusOnTap(TapDownDetails details, BuildContext context) async {
+    final controller = _controller;
+
+    if (controller == null || !_cameraLive || _isCapturing) return;
+
+    // Get the preview dimensions.
+    final renderBox = context.findRenderObject() as RenderBox;
+    final localPosition = renderBox.globalToLocal(details.globalPosition);
+    final size = renderBox.size;
+
+    // Convert tap position to normalized coordinates (0.0 - 1.0).
+    final focusPoint = Offset(
+      (localPosition.dx / size.width).clamp(0.0, 1.0),
+      (localPosition.dy / size.height).clamp(0.0, 1.0),
+    );
+
+    try {
+      await controller.setFocusPoint(focusPoint);
+      await controller.setExposurePoint(focusPoint);
+    } catch (e) {
+      debugPrint('Focus failed: $e');
+    }
   }
 
   IconData _flashIcon(FlashMode mode) {
