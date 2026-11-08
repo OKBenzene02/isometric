@@ -42,6 +42,8 @@ class ModelConfig {
 }
 
 class ModelLoader {
+  ModelLoader._internal();
+  static final ModelLoader instance = ModelLoader._internal();
   final Map<ModelType, YOLO> _loadedModels = {};
 
   /// Load one model.

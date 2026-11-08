@@ -1,10 +1,16 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:isometric/common/core/config/model_config.dart';
 import 'package:isometric/common/theme/theme.dart';
 import 'package:isometric/features/camera/presentation/camera_run.dart';
 
-void main() {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Load models in background during app launch
+  ModelLoader.instance.loadAllModels().catchError((e) {
+    debugPrint('Model loading warning: $e');
+  });
 
   // Enforce pure black status bar and navigation bar for dark camera experience
   SystemChrome.setSystemUIOverlayStyle(
