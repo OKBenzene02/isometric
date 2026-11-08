@@ -1,6 +1,6 @@
 name: isometric
 description: "A new Flutter project."
-publish_to: 'none'
+publish_to: "none"
 
 version: 1.0.0+1
 
@@ -14,7 +14,7 @@ dependencies:
   google_fonts: ^6.2.1
   cupertino_icons: ^1.0.8
   camera: ^0.11.0+2
-
+  ultralytics_yolo: ^0.7.2
 dev_dependencies:
   flutter_test:
     sdk: flutter
@@ -22,3 +22,5 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  assets:
+  - assets/models/
