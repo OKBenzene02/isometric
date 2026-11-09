@@ -20,12 +20,32 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
   late DslrParams _params;
   bool _showingOriginal = false;
   String _signed(double v) => v > 0 ? '+${v.round()}' : '${v.round()}';
+  late final bool _hasImage;
+  ImageProvider? _imageProvider;
 
   @override
   void initState() {
     super.initState();
     // Automatically apply DSLR enhancement
     _params = DslrParams.autoDslr();
+    _hasImage =
+        widget.imagePath != null && File(widget.imagePath!).existsSync();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Decode at screen size, once, not on every rebuild.
+    if (_hasImage && _imageProvider == null) {
+      final width =
+          (MediaQuery.sizeOf(context).width *
+                  MediaQuery.devicePixelRatioOf(context))
+              .round();
+      _imageProvider = ResizeImage(
+        FileImage(File(widget.imagePath!)),
+        width: width,
+      );
+    }
   }
 
   void _onSave() {
@@ -217,10 +237,11 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
   Widget _buildGradedImage(DslrParams params) {
     Widget imageWidget;
 
-    if (widget.imagePath != null && File(widget.imagePath!).existsSync()) {
-      imageWidget = Image.file(
-        File(widget.imagePath!),
+    if (_hasImage) {
+      imageWidget = Image(
+        image: _imageProvider!,
         fit: BoxFit.cover,
+        gaplessPlayback: true,
         frameBuilder: (context, child, frame, wasSynchronouslyLoaded) {
           if (wasSynchronouslyLoaded || frame != null) return child;
           return const Center(
@@ -289,9 +310,11 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
 
     return Padding(
       padding: const EdgeInsets.all(12.0),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(14),
-        child: gradedWidget,
+      child: RepaintBoundary(
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(14),
+          child: gradedWidget,
+        ),
       ),
     );
   }

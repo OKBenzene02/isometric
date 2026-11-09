@@ -69,8 +69,6 @@ class _CameraRunState extends State<CameraRun> with WidgetsBindingObserver {
   double _maxZoom = 1.0;
   double _currentZoom = 1.0;
 
-  // ── Derived lens state (single source of truth: no separate flag) ───────
-  /// Wide lens is its own camera ID (otherwise it is the main camera zoomed out).
   bool get _wideIsSeparateCamera =>
       _wideRearCameraIndex != null &&
       _wideRearCameraIndex != _mainRearCameraIndex;
@@ -618,58 +616,6 @@ class _CameraRunState extends State<CameraRun> with WidgetsBindingObserver {
 
     _cameraProfiles.clear();
 
-    for (int i = 0; i < _cameras.length; i++) {
-      final camera = _cameras[i];
-
-      CameraController? testController;
-
-      try {
-        testController = CameraController(
-          camera,
-          ResolutionPreset.max,
-          enableAudio: false,
-        );
-
-        await testController.initialize();
-
-        final minZoom = await testController.getMinZoomLevel();
-        final maxZoom = await testController.getMaxZoomLevel();
-
-        final profile = CameraProfile(
-          index: i,
-          camera: camera,
-          minZoom: minZoom,
-          maxZoom: maxZoom,
-          previewSize: testController.value.previewSize,
-        );
-
-        _cameraProfiles.add(profile);
-
-        debugPrint('''
-========== CAMERA PROFILE ==========
-ID: ${camera.name}
-Direction: ${camera.lensDirection}
-Min zoom: $minZoom
-Max zoom: $maxZoom
-Preview: ${profile.previewSize}
-Resolution pixels: ${profile.resolutionPixels}
-====================================
-''');
-      } on CameraException catch (e) {
-        // Permission problems must reach _startCamera, otherwise discovery
-        // would silently "finish" empty and never run again.
-        if (e.code.contains('AccessDenied') ||
-            e.code.contains('AccessRestricted')) {
-          rethrow;
-        }
-        debugPrint('Camera ${camera.name} discovery failed: $e');
-      } catch (e) {
-        debugPrint('Camera ${camera.name} discovery failed: $e');
-      } finally {
-        await testController?.dispose();
-      }
-    }
-
     // Find rear cameras.
     final rearProfiles = _cameraProfiles
         .where(
@@ -698,9 +644,6 @@ Resolution pixels: ${profile.resolutionPixels}
         (a, b) => a.minZoom <= b.minZoom ? a : b,
       );
 
-      // Only treat it as wide if it really is: it zooms out below 1x, or it
-      // reaches a lower zoom than the main camera. Otherwise there is no wide
-      // lens we can reach, so the Wide / 1x buttons stay hidden.
       final isReallyWide =
           wideCamera.minZoom < 0.95 ||
           wideCamera.minZoom < mainCamera.minZoom - 0.05;
@@ -709,13 +652,6 @@ Resolution pixels: ${profile.resolutionPixels}
       _wideMinZoom = wideCamera.minZoom;
 
       _cameraIndex = mainCamera.index;
-
-      debugPrint('MAIN CAMERA: ${mainCamera.camera.name}');
-      debugPrint(
-        isReallyWide
-            ? 'WIDE CAMERA: ${wideCamera.camera.name} (min zoom ${wideCamera.minZoom})'
-            : 'NO WIDE CAMERA FOUND',
-      );
     }
 
     if (frontProfiles.isNotEmpty) {
