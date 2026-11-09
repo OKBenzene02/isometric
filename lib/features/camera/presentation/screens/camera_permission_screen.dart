@@ -1,16 +1,10 @@
-import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:isometric/common/theme/theme.dart';
 import 'package:isometric/common/widgets/glass_container.dart';
+import 'package:isometric/features/camera/presentation/widgets/step_instruction_card.dart';
 
-/// Shown when camera permission has been denied.
-/// Guides the user to grant access — either via a system dialog or Settings.
 class CameraPermissionScreen extends StatelessWidget {
-  /// True  → user denied once (can still request via dialog).
-  /// False → user denied permanently (must open Settings).
   final bool isPermanentlyDenied;
-
-  /// Called when the user taps "Grant Permission" or "Open Settings".
   final VoidCallback onRetry;
 
   const CameraPermissionScreen({
@@ -108,7 +102,7 @@ class CameraPermissionScreen extends StatelessWidget {
               if (isPermanentlyDenied) ...[
                 const SizedBox(height: 14),
                 // Step instruction
-                _StepInstructionCard(),
+                StepInstructionCard(),
               ],
 
               const Spacer(flex: 3),
@@ -126,68 +120,6 @@ class CameraPermissionScreen extends StatelessWidget {
             ],
           ),
         ),
-      ),
-    );
-  }
-}
-
-class _StepInstructionCard extends StatelessWidget {
-  @override
-  Widget build(BuildContext context) {
-    final steps = Platform.isAndroid
-        ? ['Open Settings', 'Tap Apps → Isometric', 'Permissions → Camera → Allow']
-        : ['Open Settings', 'Scroll to Isometric', 'Camera → Allow'];
-
-    return GlassContainer(
-      borderRadius: 18,
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-      backgroundColor: AppColors.glassSurface,
-      borderColor: AppColors.glassBorder,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: steps.asMap().entries.map((entry) {
-          final i = entry.key;
-          final step = entry.value;
-          return Padding(
-            padding: EdgeInsets.only(bottom: i < steps.length - 1 ? 10 : 0),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Container(
-                  width: 20,
-                  height: 20,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: AppColors.surfaceHighlight,
-                    border: Border.all(color: AppColors.grey700, width: 1),
-                  ),
-                  child: Center(
-                    child: Text(
-                      '${i + 1}',
-                      style: AppTypography.cameraTelemetry(
-                        fontSize: 10,
-                        fontWeight: FontWeight.w700,
-                        color: AppColors.grey200,
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Text(
-                    step,
-                    style: AppTypography.cameraTelemetry(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w400,
-                      letterSpacing: 0.2,
-                      color: AppColors.grey300,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          );
-        }).toList(),
       ),
     );
   }

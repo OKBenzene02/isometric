@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:isometric/common/core/config/model_config.dart';
 import 'package:isometric/common/theme/theme.dart';
-import 'package:isometric/features/camera/presentation/camera_run.dart';
+import 'package:isometric/features/camera/presentation/screens/camera_run.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
