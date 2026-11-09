@@ -3,7 +3,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:isometric/common/theme/theme.dart';
 import 'package:isometric/common/widgets/full_screen_loader.dart';
-import 'package:isometric/features/camera/domain/camera_profiles.dart';
 import 'package:isometric/features/camera/presentation/screens/camera_permission_screen.dart';
 import 'package:isometric/features/camera/presentation/screens/photo_editor_screen.dart';
 import 'package:isometric/features/camera/presentation/widgets/camera_preview_fill.dart';
@@ -37,8 +36,6 @@ class _CameraRunState extends State<CameraRun> with WidgetsBindingObserver {
   CameraController? _controller; // null whenever there is no live camera
   int _cameraIndex = 0;
 
-  // Camera discovery
-  final List<CameraProfile> _cameraProfiles = [];
   bool _hasDiscoveredCameras = false;
 
   int? _mainRearCameraIndex;
@@ -85,8 +82,7 @@ class _CameraRunState extends State<CameraRun> with WidgetsBindingObserver {
         : _currentZoom < 0.95;
   }
 
-  bool get _isOneXActive =>
-      !_isWideActive && (_currentZoom - 1.0).abs() < 0.05;
+  bool get _isOneXActive => !_isWideActive && (_currentZoom - 1.0).abs() < 0.05;
 
   String get _wideLabel =>
       _wideIsSeparateCamera ? 'Wide' : '${_wideMinZoom.toStringAsFixed(1)}x';
@@ -214,6 +210,11 @@ class _CameraRunState extends State<CameraRun> with WidgetsBindingObserver {
       try {
         _minZoom = await controller.getMinZoomLevel();
         _maxZoom = await controller.getMaxZoomLevel();
+        // set wide angle zoom level in the sliders
+        if (_minZoom < 0.95) {
+          _wideMinZoom = _minZoom;
+          _wideRearCameraIndex = _mainRearCameraIndex;
+        }
 
         // Keep the zoom the user had (e.g. wide) across resume; reset it to
         // 1.0 on lens/camera switches by setting _currentZoom before calling.
@@ -362,15 +363,22 @@ class _CameraRunState extends State<CameraRun> with WidgetsBindingObserver {
   /// - Separate wide camera ID: switches camera.
   Future<void> _selectWide(bool wide) async {
     if (!_hasWideAngle || _isCapturing || _isSwitching) return;
-    if (wide == _isWideActive) return;
+
+    // If tapping wide when already wide, or tapping 1x when already at 1x, ignore.
+    if (wide && _isWideActive) return;
+    if (!wide && _isOneXActive) return;
 
     if (_wideIsSeparateCamera) {
       final target = wide ? _wideRearCameraIndex! : _mainRearCameraIndex!;
-      setState(() => _isSwitching = true);
-      _cameraIndex = target;
-      _currentZoom = 1.0;
-      await _startCamera(_cameras[target]);
-      if (mounted) setState(() => _isSwitching = false);
+      if (_cameraIndex != target) {
+        setState(() => _isSwitching = true);
+        _cameraIndex = target;
+        _currentZoom = 1.0;
+        await _startCamera(_cameras[target]);
+        if (mounted) setState(() => _isSwitching = false);
+      } else {
+        await _setZoom(1.0);
+      }
     } else {
       await _setZoom(wide ? _wideMinZoom : 1.0);
     }
@@ -612,55 +620,27 @@ class _CameraRunState extends State<CameraRun> with WidgetsBindingObserver {
   }
 
   Future<void> _discoverCameras() async {
-    if (_hasDiscoveredCameras) return;
-
-    _cameraProfiles.clear();
-
-    // Find rear cameras.
-    final rearProfiles = _cameraProfiles
-        .where(
-          (profile) => profile.camera.lensDirection == CameraLensDirection.back,
-        )
-        .toList();
-
-    // Find front camera.
-    final frontProfiles = _cameraProfiles
-        .where(
-          (profile) =>
-              profile.camera.lensDirection == CameraLensDirection.front,
-        )
-        .toList();
-
-    if (rearProfiles.isNotEmpty) {
-      // Main camera = highest preview resolution.
-      final mainCamera = rearProfiles.reduce(
-        (a, b) => a.resolutionPixels >= b.resolutionPixels ? a : b,
-      );
-
-      _mainRearCameraIndex = mainCamera.index;
-
-      // Wide candidate = rear camera with the lowest minimum zoom.
-      final wideCamera = rearProfiles.reduce(
-        (a, b) => a.minZoom <= b.minZoom ? a : b,
-      );
-
-      final isReallyWide =
-          wideCamera.minZoom < 0.95 ||
-          wideCamera.minZoom < mainCamera.minZoom - 0.05;
-
-      _wideRearCameraIndex = isReallyWide ? wideCamera.index : null;
-      _wideMinZoom = wideCamera.minZoom;
-
-      _cameraIndex = mainCamera.index;
+    if (_hasDiscoveredCameras || _cameras.isEmpty) return;
+    int? firstRearIndex;
+    int? secondRearIndex;
+    int? frontIndex;
+    for (int i = 0; i < _cameras.length; i++) {
+      final cam = _cameras[i];
+      if (cam.lensDirection == CameraLensDirection.back) {
+        if (firstRearIndex == null) {
+          firstRearIndex = i;
+        } else {
+          secondRearIndex ??= i;
+        }
+      } else if (cam.lensDirection == CameraLensDirection.front) {
+        frontIndex ??= i;
+      }
     }
-
-    if (frontProfiles.isNotEmpty) {
-      _frontCameraIndex = frontProfiles.first.index;
-    }
-
-    // Only mark as done when something was found, so a failed first attempt
-    // (e.g. permission denied) is retried next time.
-    _hasDiscoveredCameras = _cameraProfiles.isNotEmpty;
+    _mainRearCameraIndex = firstRearIndex ?? 0;
+    _wideRearCameraIndex = secondRearIndex;
+    _frontCameraIndex = frontIndex;
+    _cameraIndex = _mainRearCameraIndex!;
+    _hasDiscoveredCameras = true;
   }
 
   IconData _flashIcon(FlashMode mode) {
