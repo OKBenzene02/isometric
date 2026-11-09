@@ -1,51 +1,129 @@
 import 'dart:io';
+import 'dart:typed_data';
+import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:isometric/common/theme/theme.dart';
 import 'package:isometric/common/widgets/glass_container.dart';
-import 'package:isometric/features/camera/domain/dslr_enhancer.dart';
+import 'package:isometric/features/camera/domain/dslr_compositor.dart';
+import 'package:isometric/features/camera/domain/scene_analysis.dart';
 
 /// Clean DSLR Editor Screen:
-/// Automatically applies DSLR color grading when opened.
-/// User can fine-tune exposure, contrast, warmth, saturation, and vignette, or save.
+/// Runs DslrCompositor shader on GPU with YOLO subject mask & depth.
 class PhotoEditorScreen extends StatefulWidget {
   final String? imagePath;
+  final SceneAnalysis? analysis;
 
-  const PhotoEditorScreen({super.key, required this.imagePath});
+  const PhotoEditorScreen({
+    super.key,
+    required this.imagePath,
+    this.analysis,
+  });
 
   @override
   State<PhotoEditorScreen> createState() => _PhotoEditorScreenState();
 }
 
 class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
-  late DslrParams _params;
+  late ComposeParams _params;
   bool _showingOriginal = false;
-  String _signed(double v) => v > 0 ? '+${v.round()}' : '${v.round()}';
-  late final bool _hasImage;
-  ImageProvider? _imageProvider;
+  bool _isRendering = true;
+  String? _renderError;
+
+  ui.Image? _originalUiImage;
+  ui.Image? _renderedUiImage;
+  ui.Image? _maskImage;
+  ui.Image? _depthImage;
 
   @override
   void initState() {
     super.initState();
-    // Automatically apply DSLR enhancement
-    _params = DslrParams.autoDslr();
-    _hasImage =
-        widget.imagePath != null && File(widget.imagePath!).existsSync();
+    final scene = widget.analysis?.scene ?? SceneType.general;
+    _params = ComposeParams.forScene(scene);
+    _loadAndRender();
+  }
+
+  Future<void> _loadAndRender() async {
+    if (widget.imagePath == null || !File(widget.imagePath!).existsSync()) {
+      if (mounted) setState(() => _isRendering = false);
+      return;
+    }
+
+    try {
+      final bytes = await File(widget.imagePath!).readAsBytes();
+      final img = await imageFromBytes(bytes);
+      _originalUiImage = img;
+
+      final analysis = widget.analysis;
+      if (analysis != null && analysis.hasSubject && analysis.mask.isNotEmpty) {
+        _maskImage = await imageFromGray(
+          analysis.mask,
+          analysis.maskWidth,
+          analysis.maskHeight,
+        );
+      } else {
+        // Fallback: 1x1 black mask (all background, no subject cutout)
+        _maskImage = await imageFromGray(Uint8List.fromList([0]), 1, 1);
+      }
+
+      if (analysis != null && analysis.depth != null && analysis.depth!.isNotEmpty) {
+        _depthImage = await imageFromGray(
+          analysis.depth!,
+          analysis.depthWidth,
+          analysis.depthHeight,
+        );
+      }
+
+      await _applyShader();
+    } catch (e, st) {
+      debugPrint('Shader render error: $e\n$st');
+      if (mounted) {
+        setState(() {
+          _isRendering = false;
+          _renderError = e.toString();
+        });
+      }
+    }
+  }
+
+  Future<void> _applyShader() async {
+    if (_originalUiImage == null || _maskImage == null) return;
+    if (mounted) setState(() => _isRendering = true);
+
+    try {
+      final out = await DslrCompositor.render(
+        image: _originalUiImage!,
+        mask: _maskImage!,
+        depth: _depthImage,
+        params: _params,
+        focusDepth: widget.analysis?.focusDepth ?? 0.5,
+        maxSide: 1920,
+      );
+
+      if (mounted) {
+        setState(() {
+          _renderedUiImage?.dispose();
+          _renderedUiImage = out;
+          _isRendering = false;
+        });
+      }
+    } catch (e, st) {
+      debugPrint('Compositor render error: $e\n$st');
+      if (mounted) {
+        setState(() {
+          _isRendering = false;
+          _renderError = e.toString();
+        });
+      }
+    }
   }
 
   @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    // Decode at screen size, once, not on every rebuild.
-    if (_hasImage && _imageProvider == null) {
-      final width =
-          (MediaQuery.sizeOf(context).width *
-                  MediaQuery.devicePixelRatioOf(context))
-              .round();
-      _imageProvider = ResizeImage(
-        FileImage(File(widget.imagePath!)),
-        width: width,
-      );
-    }
+  void dispose() {
+    _originalUiImage?.dispose();
+    _renderedUiImage?.dispose();
+    _maskImage?.dispose();
+    _depthImage?.dispose();
+    super.dispose();
   }
 
   void _onSave() {
@@ -67,7 +145,7 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
             const SizedBox(width: 10),
             Expanded(
               child: Text(
-                'Photo saved with DSLR enhancement!',
+                'Photo saved with DSLR shader enhancement!',
                 style: AppTypography.cameraTelemetry(fontSize: 12),
               ),
             ),
@@ -80,30 +158,54 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
   }
 
   void _resetToAuto() {
+    final scene = widget.analysis?.scene ?? SceneType.general;
     setState(() {
-      _params = DslrParams.autoDslr();
+      _params = ComposeParams.forScene(scene);
     });
+    _applyShader();
   }
 
   @override
   Widget build(BuildContext context) {
-    final effectiveParams = _showingOriginal ? DslrParams.original() : _params;
-
     return Scaffold(
       backgroundColor: AppColors.pureBlack,
       body: SafeArea(
         child: Column(
           children: [
-            // Top Bar
             _buildTopBar(),
 
-            // Image Preview Area with DSLR Color Grading
             Expanded(
               child: Stack(
                 fit: StackFit.expand,
                 alignment: Alignment.center,
                 children: [
-                  _buildGradedImage(effectiveParams),
+                  _buildImageView(),
+
+                  if (_isRendering)
+                    Container(
+                      color: Colors.black45,
+                      child: const Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            CircularProgressIndicator(
+                              color: AppColors.pureWhite,
+                              strokeWidth: 2.5,
+                            ),
+                            SizedBox(height: 12),
+                            Text(
+                              'APPLYING DSLR SHADER...',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 11,
+                                letterSpacing: 1.2,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
 
                   // Hold-to-compare button
                   Positioned(
@@ -112,8 +214,7 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
                     child: GestureDetector(
                       onTapDown: (_) => setState(() => _showingOriginal = true),
                       onTapUp: (_) => setState(() => _showingOriginal = false),
-                      onTapCancel: () =>
-                          setState(() => _showingOriginal = false),
+                      onTapCancel: () => setState(() => _showingOriginal = false),
                       child: GlassContainer(
                         borderRadius: 20,
                         padding: const EdgeInsets.symmetric(
@@ -153,7 +254,7 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
                     ),
                   ),
 
-                  // Reset to Auto DSLR button (if user altered values)
+                  // Reset to Auto button
                   Positioned(
                     top: 14,
                     left: 16,
@@ -190,7 +291,6 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
               ),
             ),
 
-            // Bottom Adjustments Panel (Sliders only, no confusing tabs or overlays)
             _buildAdjustmentPanel(),
           ],
         ),
@@ -210,7 +310,9 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
             tooltip: 'Retake',
           ),
           Text(
-            'DSLR EDIT',
+            widget.analysis != null && widget.analysis!.hasSubject
+                ? 'DSLR BOKEH: ${widget.analysis!.subjectClass?.toUpperCase() ?? "SUBJECT"}'
+                : 'DSLR EDIT',
             style: AppTypography.cameraTelemetry(
               fontSize: 13,
               letterSpacing: 1.5,
@@ -234,88 +336,38 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
     );
   }
 
-  Widget _buildGradedImage(DslrParams params) {
-    Widget imageWidget;
+  Widget _buildImageView() {
+    final imgToShow = _showingOriginal
+        ? _originalUiImage
+        : (_renderedUiImage ?? _originalUiImage);
 
-    if (_hasImage) {
-      imageWidget = Image(
-        image: _imageProvider!,
-        fit: BoxFit.cover,
-        gaplessPlayback: true,
-        frameBuilder: (context, child, frame, wasSynchronouslyLoaded) {
-          if (wasSynchronouslyLoaded || frame != null) return child;
-          return const Center(
-            child: SizedBox(
-              width: 32,
-              height: 32,
-              child: CircularProgressIndicator(
-                color: AppColors.pureWhite,
-                strokeWidth: 2.5,
-              ),
-            ),
-          );
-        },
-      );
-    } else {
-      imageWidget = Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [Color(0xFF232526), Color(0xFF0F1012)],
-          ),
-        ),
-        child: Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(
-                Icons.photo_camera_rounded,
-                size: 52,
-                color: AppColors.grey500.withValues(alpha: 0.6),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                'CAPTURED SCENE',
-                style: AppTypography.cameraTelemetry(
-                  fontSize: 11,
-                  color: AppColors.grey400,
-                ),
-              ),
-            ],
-          ),
-        ),
-      );
-    }
-
-    // 1. Hardware accelerated GPU color grading matrix
-    Widget gradedWidget = ColorFiltered(
-      colorFilter: ColorFilter.matrix(params.toColorMatrix()),
-      child: imageWidget,
-    );
-
-    // 2. Subtle lens vignette (shared gradient from DslrParams)
-    final vignette = params.vignetteGradient();
-    if (vignette != null) {
-      gradedWidget = Stack(
-        fit: StackFit.expand,
-        children: [
-          gradedWidget,
-          IgnorePointer(
-            child: DecoratedBox(decoration: BoxDecoration(gradient: vignette)),
-          ),
-        ],
-      );
-    }
-
-    return Padding(
-      padding: const EdgeInsets.all(12.0),
-      child: RepaintBoundary(
+    if (imgToShow != null) {
+      return Padding(
+        padding: const EdgeInsets.all(12.0),
         child: ClipRRect(
           borderRadius: BorderRadius.circular(14),
-          child: gradedWidget,
+          child: RawImage(
+            image: imgToShow,
+            fit: BoxFit.contain,
+          ),
         ),
-      ),
+      );
+    }
+
+    if (_renderError != null) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24.0),
+          child: Text(
+            'Render error: $_renderError',
+            style: const TextStyle(color: Colors.redAccent, fontSize: 12),
+          ),
+        ),
+      );
+    }
+
+    return const Center(
+      child: CircularProgressIndicator(color: AppColors.pureWhite),
     );
   }
 
@@ -327,40 +379,45 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
         mainAxisSize: MainAxisSize.min,
         children: [
           _sliderRow(
-            'CONTRAST',
-            _signed((_params.contrast - 1.0) * 100),
-            _params.contrast,
-            0.8,
-            1.6,
-            (v) => setState(() => _params = _params.copyWith(contrast: v)),
+            'BLUR / BOKEH',
+            '${(_params.blurStrength * 100).round()}%',
+            _params.blurStrength,
+            0.0,
+            1.0,
+            (v) => _updateParam(_params.copyWith(blurStrength: v)),
           ),
           _sliderRow(
             'WARMTH',
-            _signed(_params.warmth * 100),
+            '${(_params.warmth * 100).round()}',
             _params.warmth,
-            -0.5,
-            0.5,
-            (v) => setState(() => _params = _params.copyWith(warmth: v)),
+            -0.3,
+            0.3,
+            (v) => _updateParam(_params.copyWith(warmth: v)),
           ),
           _sliderRow(
-            'SATURATION',
-            _signed((_params.saturation - 1.0) * 100),
-            _params.saturation,
+            'EXPOSURE',
+            '${(_params.exposure * 100).round()}',
+            _params.exposure,
+            -0.5,
             0.5,
-            1.8,
-            (v) => setState(() => _params = _params.copyWith(saturation: v)),
+            (v) => _updateParam(_params.copyWith(exposure: v)),
           ),
           _sliderRow(
             'VIGNETTE',
-            '${(_params.vignette / 0.8 * 100).round()}%',
+            '${(_params.vignette * 100).round()}%',
             _params.vignette,
             0.0,
-            0.8,
-            (v) => setState(() => _params = _params.copyWith(vignette: v)),
+            0.6,
+            (v) => _updateParam(_params.copyWith(vignette: v)),
           ),
         ],
       ),
     );
+  }
+
+  void _updateParam(ComposeParams next) {
+    setState(() => _params = next);
+    _applyShader();
   }
 
   Widget _sliderRow(
@@ -376,7 +433,7 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
       child: Row(
         children: [
           SizedBox(
-            width: 82,
+            width: 90,
             child: Text(
               label,
               style: AppTypography.cameraTelemetry(
@@ -394,7 +451,7 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
             ),
           ),
           SizedBox(
-            width: 50,
+            width: 45,
             child: Text(
               valueString,
               textAlign: TextAlign.end,

@@ -6,11 +6,13 @@ class ModelInformation {
   final String name;
   final String assetPath;
   final String description;
+  final YOLOTask task;
 
   const ModelInformation({
     required this.name,
     required this.assetPath,
     required this.description,
+    required this.task,
   });
 }
 
@@ -18,25 +20,29 @@ class ModelConfig {
   ModelConfig._();
 
   static const Map<ModelType, ModelInformation> models = {
-    ModelType.depth: ModelInformation(
-      name: 'YOLO26 Depth',
-      assetPath: 'assets/models/yolo26n-depth.tflite',
-      description: 'Separates objects from the background using masks.',
-    ),
     ModelType.detection: ModelInformation(
       name: 'YOLO26 Detection',
       assetPath: 'assets/models/yolo26n.tflite',
-      description: 'Detects objects using bounding boxes.',
+      description: 'Object detection.',
+      task: YOLOTask.detect,
     ),
     ModelType.segmentation: ModelInformation(
       name: 'YOLO26 Segmentation',
       assetPath: 'assets/models/yolo26n-seg.tflite',
-      description: 'Separates objects from the background using masks.',
+      description: 'Instance segmentation.',
+      task: YOLOTask.segment,
     ),
     ModelType.semanticSegmentation: ModelInformation(
       name: 'YOLO26 Semantic Segmentation',
       assetPath: 'assets/models/yolo26n-sem.tflite',
-      description: 'Identifies scene regions and semantic classes.',
+      description: 'Semantic segmentation.',
+      task: YOLOTask.semantic,
+    ),
+    ModelType.depth: ModelInformation(
+      name: 'YOLO26 Depth',
+      assetPath: 'assets/models/yolo26n-depth.tflite',
+      description: 'Depth estimation.',
+      task: YOLOTask.depth,
     ),
   };
 }
@@ -55,9 +61,7 @@ class ModelLoader {
 
     final definition = ModelConfig.models[type]!;
 
-    final model = YOLO(
-      modelPath: definition.assetPath,
-    );
+    final model = YOLO(modelPath: definition.assetPath);
 
     try {
       await model.loadModel();
@@ -66,9 +70,7 @@ class ModelLoader {
 
       return model;
     } catch (error) {
-      throw Exception(
-        'Failed to load ${definition.name}: $error',
-      );
+      throw Exception('Failed to load ${definition.name}: $error');
     }
   }
 

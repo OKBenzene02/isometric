@@ -34,6 +34,7 @@ class AnalysisPipeline {
       );
       final depthModel = await ModelLoader.instance.loadModel(ModelType.depth);
       final loadMs = lap();
+      await Future.delayed(const Duration(milliseconds: 250));
 
       final bytes = await File(imagePath).readAsBytes();
       final readMs = lap();
@@ -41,15 +42,23 @@ class AnalysisPipeline {
       stage.value = AnalysisStage.segmenting;
       final seg = _asResults(await segModel.predict(bytes));
       final segMs = lap();
+      await Future.delayed(const Duration(milliseconds: 300));
 
       stage.value = AnalysisStage.estimatingDepth;
       final dep = _asResults(await depthModel.predict(bytes));
       final depthMs = lap();
+      await Future.delayed(const Duration(milliseconds: 300));
 
       stage.value = AnalysisStage.refining;
+      debugPrint('Detections found: ${seg.detections.length}');
+      for (final d in seg.detections) {
+        debugPrint('Detected: ${d.className} (conf: ${d.confidence.toStringAsFixed(2)}, hasMask: ${d.mask != null && d.mask!.isNotEmpty})');
+      }
+
       final input = _PostInput.from(seg, dep);
       final result = await Isolate.run(() => _postProcess(input));
       final postMs = lap();
+      await Future.delayed(const Duration(milliseconds: 200));
 
       debugPrint(
         'Analysis ${total.elapsedMilliseconds} ms '
@@ -127,8 +136,8 @@ class _PostInput {
 // ── Everything below runs in the background isolate ─────────────────────────
 
 const int _kGrid = 640; // output mask resolution (model resolution)
-const double _kMinConfidence = 0.35;
-const double _kMinArea = 0.02; // subject must cover at least 2% of the frame
+const double _kMinConfidence = 0.15; // lowered so objects are not discarded
+const double _kMinArea = 0.005; // 0.5% area threshold for smaller subjects
 
 SceneAnalysis _postProcess(_PostInput input) {
   final sw = Stopwatch()..start();

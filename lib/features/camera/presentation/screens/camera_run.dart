@@ -4,6 +4,8 @@ import 'package:flutter/services.dart';
 import 'package:isometric/common/theme/theme.dart';
 import 'package:isometric/common/widgets/full_screen_loader.dart';
 import 'package:isometric/features/camera/presentation/screens/camera_permission_screen.dart';
+import 'package:isometric/features/camera/domain/analysis_pipeline.dart';
+import 'package:isometric/features/camera/domain/scene_analysis.dart';
 import 'package:isometric/features/camera/presentation/screens/photo_editor_screen.dart';
 import 'package:isometric/features/camera/presentation/widgets/camera_preview_fill.dart';
 import 'package:isometric/features/camera/presentation/widgets/glass_button.dart';
@@ -326,20 +328,51 @@ class _CameraRunState extends State<CameraRun> with WidgetsBindingObserver {
   Future<void> _capturePhoto() async {
     final controller = _controller;
     if (_isCapturing || controller == null || !_cameraLive) return;
+    bool previewPaused = false;
 
     setState(() => _isCapturing = true);
     try {
       final file = await controller.takePicture();
+      debugPrint('Captured photo: ${file.path}, running YOLO analysis...');
+      await controller.pausePreview();
+      previewPaused = true;
+      SceneAnalysis analysis = SceneAnalysis.none();
+      try {
+        analysis = await AnalysisPipeline.instance.analyze(file.path);
+        debugPrint(
+          'YOLO analysis completed: ${analysis.scene.name}, '
+          'hasSubject: ${analysis.hasSubject}',
+        );
+      } catch (e, st) {
+        debugPrint('YOLO analysis error: $e\n$st');
+      }
+
       if (!mounted) return;
       await Navigator.of(context).push(
         MaterialPageRoute(
-          builder: (_) => PhotoEditorScreen(imagePath: file.path),
+          builder: (_) =>
+              PhotoEditorScreen(imagePath: file.path, analysis: analysis),
         ),
       );
     } catch (e) {
       debugPrint('Capture error: $e');
     } finally {
-      if (mounted) setState(() => _isCapturing = false);
+      // Resume camera when returning from Photo Editor.
+      if (previewPaused &&
+          mounted &&
+          identical(_controller, controller) &&
+          controller.value.isInitialized) {
+        try {
+          await controller.resumePreview();
+          debugPrint('Camera preview resumed.');
+        } catch (e) {
+          debugPrint('Failed to resume camera preview: $e');
+        }
+      }
+
+      if (mounted) {
+        setState(() => _isCapturing = false);
+      }
     }
   }
 

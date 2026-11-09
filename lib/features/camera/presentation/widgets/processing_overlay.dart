@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:isometric/common/theme/app_colors.dart';
 import 'package:isometric/common/theme/app_typography.dart';
+import 'package:isometric/features/camera/domain/analysis_pipeline.dart';
 
 class ProcessingOverlay extends StatelessWidget {
   const ProcessingOverlay({super.key});
@@ -32,13 +33,25 @@ class ProcessingOverlay extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(height: 14),
-                Text(
-                  'PROCESSING PHOTO...',
-                  style: AppTypography.cameraTelemetry(
-                    fontSize: 11,
-                    letterSpacing: 1.5,
-                    fontWeight: FontWeight.w600,
-                  ),
+                ValueListenableBuilder<AnalysisStage?>(
+                  valueListenable: AnalysisPipeline.instance.stage,
+                  builder: (context, stage, _) {
+                    final text = switch (stage) {
+                      AnalysisStage.loadingModels => 'LOADING YOLO MODELS...',
+                      AnalysisStage.segmenting => 'DETECTING OBJECTS...',
+                      AnalysisStage.estimatingDepth => 'ESTIMATING DEPTH...',
+                      AnalysisStage.refining => 'REFINING SUBJECT...',
+                      null => 'PROCESSING PHOTO...',
+                    };
+                    return Text(
+                      text,
+                      style: AppTypography.cameraTelemetry(
+                        fontSize: 11,
+                        letterSpacing: 1.5,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    );
+                  },
                 ),
               ],
             ),
