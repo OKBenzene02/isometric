@@ -33,6 +33,7 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
   ui.Image? _renderedUiImage;
   ui.Image? _maskImage;
   ui.Image? _depthImage;
+  int _selectedAdjustment = 0;
 
   bool get _hasSubject => widget.analysis?.hasSubject ?? false;
 
@@ -376,96 +377,178 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
     );
   }
 
+  List<_Adjustment> _adjustments() => [
+    _Adjustment(
+      label: 'BLUR',
+      icon: Icons.blur_on_rounded,
+      min: 0.0,
+      max: 1.0,
+      value: _params.blurStrength,
+      display: '${(_params.blurStrength * 100).round()}%',
+      // Disabled when no subject was found: nothing to separate.
+      onChanged: _hasSubject
+          ? (v) => _updateParam(_params.copyWith(blurStrength: v))
+          : null,
+    ),
+    _Adjustment(
+      label: 'WARMTH',
+      icon: Icons.thermostat_rounded,
+      min: -0.3,
+      max: 0.3,
+      value: _params.warmth,
+      display: '${(_params.warmth * 100).round()}',
+      onChanged: (v) => _updateParam(_params.copyWith(warmth: v)),
+    ),
+    _Adjustment(
+      label: 'EXPOSURE',
+      icon: Icons.exposure_rounded,
+      min: -0.5,
+      max: 0.5,
+      value: _params.exposure,
+      display: '${(_params.exposure * 100).round()}',
+      onChanged: (v) => _updateParam(_params.copyWith(exposure: v)),
+    ),
+    _Adjustment(
+      label: 'VIGNETTE',
+      icon: Icons.vignette_rounded,
+      min: 0.0,
+      max: 0.6,
+      value: _params.vignette,
+      display: '${(_params.vignette * 100).round()}%',
+      onChanged: (v) => _updateParam(_params.copyWith(vignette: v)),
+    ),
+  ];
+
   Widget _buildAdjustmentPanel() {
+    final items = _adjustments();
+    final selected = items[_selectedAdjustment.clamp(0, items.length - 1)];
+
     return Container(
       color: AppColors.dark950,
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 18),
+      padding: const EdgeInsets.only(top: 14, bottom: 16),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          _sliderRow(
-            'BLUR / BOKEH',
-            '${(_params.blurStrength * 100).round()}%',
-            _params.blurStrength,
-            0.0,
-            1.0,
-            // Disabled when no subject was found: nothing to separate.
-            _hasSubject
-                ? (v) => _updateParam(_params.copyWith(blurStrength: v))
-                : null,
+          // Active adjustment: name + value
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 24),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  selected.label,
+                  style: AppTypography.cameraTelemetry(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 1.2,
+                    color: AppColors.pureWhite,
+                  ),
+                ),
+                Text(
+                  selected.display,
+                  style: AppTypography.cameraTelemetry(
+                    fontSize: 11,
+                    color: AppColors.grey200,
+                  ),
+                ),
+              ],
+            ),
           ),
-          _sliderRow(
-            'WARMTH',
-            '${(_params.warmth * 100).round()}',
-            _params.warmth,
-            -0.3,
-            0.3,
-            (v) => _updateParam(_params.copyWith(warmth: v)),
+
+          // One slider for whichever circle is selected
+          Slider(
+            value: selected.value.clamp(selected.min, selected.max),
+            min: selected.min,
+            max: selected.max,
+            onChanged: selected.onChanged,
           ),
-          _sliderRow(
-            'EXPOSURE',
-            '${(_params.exposure * 100).round()}',
-            _params.exposure,
-            -0.5,
-            0.5,
-            (v) => _updateParam(_params.copyWith(exposure: v)),
-          ),
-          _sliderRow(
-            'VIGNETTE',
-            '${(_params.vignette * 100).round()}%',
-            _params.vignette,
-            0.0,
-            0.6,
-            (v) => _updateParam(_params.copyWith(vignette: v)),
+
+          const SizedBox(height: 4),
+
+          // Circle carousel
+          SizedBox(
+            height: 84,
+            child: Center(
+              child: ListView.separated(
+                shrinkWrap: true,
+                scrollDirection: Axis.horizontal,
+                padding: const EdgeInsets.symmetric(horizontal: 20),
+                itemCount: items.length,
+                separatorBuilder: (_, __) => const SizedBox(width: 18),
+                itemBuilder: (_, i) => _adjustmentCircle(
+                  items[i],
+                  active: i == _selectedAdjustment,
+                  onTap: () => setState(() => _selectedAdjustment = i),
+                ),
+              ),
+            ),
           ),
         ],
       ),
     );
   }
 
-  Widget _sliderRow(
-    String label,
-    String valueString,
-    double value,
-    double min,
-    double max,
-    ValueChanged<double>? onChanged,
-  ) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 2),
-      child: Row(
-        children: [
-          SizedBox(
-            width: 90,
-            child: Text(
-              label,
+  Widget _adjustmentCircle(
+    _Adjustment item, {
+    required bool active,
+    required VoidCallback onTap,
+  }) {
+    final enabled = item.onChanged != null;
+    final fg = active ? AppColors.pureBlack : AppColors.pureWhite;
+
+    return Opacity(
+      opacity: enabled ? 1.0 : 0.35,
+      child: GestureDetector(
+        onTap: enabled ? onTap : null,
+        behavior: HitTestBehavior.opaque,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            AnimatedContainer(
+              duration: const Duration(milliseconds: 150),
+              width: 52,
+              height: 52,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: active ? AppColors.pureWhite : AppColors.glassBackground,
+                border: Border.all(
+                  color: active ? AppColors.pureWhite : AppColors.glassBorder,
+                  width: 1,
+                ),
+              ),
+              child: Icon(item.icon, size: 22, color: fg),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              item.label,
               style: AppTypography.cameraTelemetry(
-                fontSize: 10,
-                color: AppColors.grey400,
+                fontSize: 9,
+                color: active ? AppColors.pureWhite : AppColors.grey400,
               ),
             ),
-          ),
-          Expanded(
-            child: Slider(
-              value: value.clamp(min, max),
-              min: min,
-              max: max,
-              onChanged: onChanged,
-            ),
-          ),
-          SizedBox(
-            width: 45,
-            child: Text(
-              valueString,
-              textAlign: TextAlign.end,
-              style: AppTypography.cameraTelemetry(
-                fontSize: 10,
-                color: AppColors.grey200,
-              ),
-            ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
+}
+
+class _Adjustment {
+  final String label;
+  final IconData icon;
+  final double min;
+  final double max;
+  final double value;
+  final String display;
+  final ValueChanged<double>? onChanged;
+
+  const _Adjustment({
+    required this.label,
+    required this.icon,
+    required this.min,
+    required this.max,
+    required this.value,
+    required this.display,
+    required this.onChanged,
+  });
 }

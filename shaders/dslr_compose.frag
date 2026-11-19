@@ -80,7 +80,7 @@ vec4 diskBlur(vec2 uv, float radius) {
         vec3 c = texture(uImage, suv).rgb;
         float sm = texture(uMask, suv).r;
         float hl = smoothstep(uHlThreshold, 1.0, dot(c, LUMA));
-        float w = (1.0 - sm) * (1.0 + hl * uHlBoost);
+        float w = (1.0 - smoothstep(0.0, 0.3, sm)) * (1.0 + hl * uHlBoost);
         acc += c * w;
         wsum += w;
     }
@@ -145,8 +145,8 @@ void main() {
             texture(uImage, uv + vec2(0.0, -p.y)).rgb +
             texture(uImage, uv + vec2(0.0,  p.y)).rgb
         ) * 0.25;
-        vec3 sharp = center + (center - blurredCenter) * uSharpen;
-        col = mix(col, sharp, maskVal);
+        // Add only the detail, scaled by the mask. Never re-mix the original.
+        col += (center - blurredCenter) * uSharpen * maskVal;
     }
 
     // 5. Decorative Bokeh Circles / Fairy Lights
