@@ -67,6 +67,26 @@ vec3 applyGreenToOlive(vec3 c, float amount) {
     return c;
 }
 
+const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
+// Returns rgb = weighted color sum, a = weight sum.
+vec4 diskBlur(vec2 uv, float radius) {
+    const int N = 32; // 64 taps x 3 textures is heavy on phones
+    vec3 acc = vec3(0.0);
+    float wsum = 0.0;
+    for (int i = 0; i < N; i++) {
+        float r = sqrt((float(i) + 0.5) / float(N));
+        float a = float(i) * 2.39996323; // golden angle
+        vec2 suv = uv + vec2(cos(a), sin(a)) * r * radius / uSize;
+        vec3 c = texture(uImage, suv).rgb;
+        float sm = texture(uMask, suv).r;
+        float hl = smoothstep(uHlThreshold, 1.0, dot(c, LUMA));
+        float w = (1.0 - sm) * (1.0 + hl * uHlBoost);
+        acc += c * w;
+        wsum += w;
+    }
+    return vec4(acc, wsum);
+}
+
 void main() {
     vec2 fragCoord = FlutterFragCoord().xy;
     vec2 uv = fragCoord / uSize;
@@ -104,45 +124,15 @@ void main() {
     float radius = blurFactor * uMaxRadius;
 
     // 3. Multi-tap Bokeh Disk Blur
-    vec3 col = vec3(0.0);
-    float totalWeight = 0.0;
-
+    vec3 col;
     if (radius < 0.75) {
         col = texture(uImage, uv).rgb;
-        totalWeight = 1.0;
     } else {
-        const int NUM_SAMPLES = 16;
-        const float GOLDEN_ANGLE = 2.39996323;
-
-        for (int i = 0; i < NUM_SAMPLES; i++) {
-            float fi = float(i);
-            float r = sqrt((fi + 0.5) / float(NUM_SAMPLES)) * radius;
-            float theta = fi * GOLDEN_ANGLE;
-            vec2 offset = vec2(cos(theta), sin(theta)) * r / uSize;
-
-            vec3 sampleColor = texture(uImage, uv + offset).rgb;
-            float sampleMask = texture(uMask, uv + offset).r;
-
-            // Bokeh highlight boost
-            float lum = luminance(sampleColor);
-            float hlWeight = 1.0;
-            if (lum > uHlThreshold) {
-                hlWeight += pow((lum - uHlThreshold) / max(1.0 - uHlThreshold, 0.01), 2.0) * uHlBoost;
-            }
-
-            // Weight background samples more for blurred areas to prevent subject bleeding into bokeh
-            float weight = hlWeight * (1.0 - sampleMask * 0.7);
-            col += sampleColor * weight;
-            totalWeight += weight;
-        }
-
-        col /= max(totalWeight, 0.0001);
-
-        // Blend sharp subject back according to mask
-        if (maskVal > 0.01) {
-            vec3 sharpSubject = texture(uImage, uv).rgb;
-            col = mix(col, sharpSubject, maskVal);
-        }
+        vec4 b = diskBlur(uv, radius);
+        vec3 sharp = texture(uImage, uv).rgb;
+        // If every tap landed on the subject, there is nothing to blur with.
+        col = b.a > 0.0001 ? b.rgb / b.a : sharp;
+        col = mix(col, sharp, maskVal);
     }
 
     // 4. Subject Sharpening (Unsharp masking)
