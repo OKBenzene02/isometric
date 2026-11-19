@@ -255,25 +255,24 @@ class ObjectLabels {
   /// Living subjects and food get a slight natural focal bonus, but any
   /// centered/prominent object is fully eligible.
   static double subjectPriorityWeight(String label) {
-    final cat = getCategory(label);
-    switch (cat) {
+    switch (getCategory(label)) {
       case ObjectCategory.person:
-        return 0.35;
+        return 1.0;
       case ObjectCategory.animal:
-        return 0.30;
+        return 0.85;
       case ObjectCategory.food:
-        return 0.25;
+        return 0.7;
       case ObjectCategory.electronic:
       case ObjectCategory.indoorObject:
       case ObjectCategory.accessory:
       case ObjectCategory.sports:
-        return 0.20;
+        return 0.55;
       case ObjectCategory.vehicle:
-        return 0.15;
+        return 0.4;
       case ObjectCategory.furniture:
       case ObjectCategory.outdoor:
       case ObjectCategory.other:
-        return 0.10;
+        return 0.25;
     }
   }
 }

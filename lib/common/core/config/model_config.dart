@@ -51,6 +51,7 @@ class ModelLoader {
   ModelLoader._internal();
   static final ModelLoader instance = ModelLoader._internal();
   final Map<ModelType, YOLO> _loadedModels = {};
+  final Map<ModelType, Future<YOLO>> _loadingModels = {};
 
   /// Load one model.
   Future<YOLO> loadModel(ModelType type) async {
@@ -59,15 +60,37 @@ class ModelLoader {
       return _loadedModels[type]!;
     }
 
+    // A capture can begin while the launch warm-up is still running. Reuse
+    // that load rather than creating a second native model instance.
+    final inFlight = _loadingModels[type];
+    if (inFlight != null) return inFlight;
+
+    final loading = _loadNewModel(type);
+    _loadingModels[type] = loading;
+    try {
+      return await loading;
+    } finally {
+      _loadingModels.remove(type);
+    }
+  }
+
+  Future<YOLO> _loadNewModel(ModelType type) async {
     final definition = ModelConfig.models[type]!;
 
-    final model = YOLO(modelPath: definition.assetPath);
+    // Each model needs its own native inference instance.  The plugin's
+    // default instance is shared, so using it for segmentation and depth
+    // causes the last loaded model to replace the one used by the other call.
+    // That left the segmentation request running the depth model and returning
+    // no masks, which in turn disabled background blur.
+    final model = YOLO(
+      modelPath: definition.assetPath,
+      task: definition.task,
+      useMultiInstance: true,
+    );
 
     try {
       await model.loadModel();
-
       _loadedModels[type] = model;
-
       return model;
     } catch (error) {
       throw Exception('Failed to load ${definition.name}: $error');
@@ -79,6 +102,13 @@ class ModelLoader {
     for (final type in ModelType.values) {
       await loadModel(type);
     }
+  }
+
+  /// Warm the segmentation model used to separate the subject from its
+  /// background. Depth is intentionally not part of capture analysis because
+  /// a second native inference can leave the camera loader waiting too long.
+  Future<void> preloadBokehModels() async {
+    await loadModel(ModelType.segmentation);
   }
 
   /// Get an already loaded model.

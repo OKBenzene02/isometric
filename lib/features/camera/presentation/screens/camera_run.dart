@@ -89,6 +89,8 @@ class _CameraRunState extends State<CameraRun> with WidgetsBindingObserver {
   String get _wideLabel =>
       _wideIsSeparateCamera ? 'Wide' : '${_wideMinZoom.toStringAsFixed(1)}x';
 
+  final _previewKey = GlobalKey();
+
   // ── Lifecycle ────────────────────────────────────────────────────────────
   @override
   void initState() {
@@ -213,7 +215,9 @@ class _CameraRunState extends State<CameraRun> with WidgetsBindingObserver {
         _minZoom = await controller.getMinZoomLevel();
         _maxZoom = await controller.getMaxZoomLevel();
         // set wide angle zoom level in the sliders
-        if (_minZoom < 0.95) {
+        if (!_isFrontCamera &&
+            _cameraIndex == _mainRearCameraIndex &&
+            _minZoom < 0.95) {
           _wideMinZoom = _minZoom;
           _wideRearCameraIndex = _mainRearCameraIndex;
         }
@@ -451,14 +455,25 @@ class _CameraRunState extends State<CameraRun> with WidgetsBindingObserver {
         fit: StackFit.expand,
         children: [
           if (live)
-            GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onTapDown: (details) => _focusOnTap(details, context),
-              child: CameraPreviewFill(controller: controller),
+            Center(
+              child: GestureDetector(
+                key: _previewKey,
+                behavior: HitTestBehavior.opaque,
+                onTapDown: _focusOnTap,
+                child: Stack(
+                  children: [
+                    CameraPreview(
+                      controller,
+                    ), // already sized to the sensor aspect
+                    Positioned.fill(
+                      child: SimpleGridOverlay(isVisible: _showGrid),
+                    ),
+                  ],
+                ),
+              ),
             )
           else
             const ColoredBox(color: AppColors.pureBlack),
-          SimpleGridOverlay(isVisible: _showGrid),
           _buildTopBar(),
           Positioned(
             left: 30,
@@ -467,6 +482,8 @@ class _CameraRunState extends State<CameraRun> with WidgetsBindingObserver {
             child: _buildZoomControls(),
           ),
           _buildBottomBar(),
+          // Keep the full-screen capture-processing status visible while
+          // segmentation runs. The shutter itself stays spinner-free.
           if (_isCapturing) const ProcessingOverlay(),
         ],
       ),
@@ -563,25 +580,20 @@ class _CameraRunState extends State<CameraRun> with WidgetsBindingObserver {
   }
 
   // ── Tap to focus ─────────────────────────────────────
-  Future<void> _focusOnTap(TapDownDetails details, BuildContext context) async {
+  Future<void> _focusOnTap(TapDownDetails details) async {
     final controller = _controller;
+    final box = _previewKey.currentContext?.findRenderObject() as RenderBox?;
+    if (controller == null || !_cameraLive || _isCapturing || box == null)
+      return;
 
-    if (controller == null || !_cameraLive || _isCapturing) return;
-
-    // Get the preview dimensions.
-    final renderBox = context.findRenderObject() as RenderBox;
-    final localPosition = renderBox.globalToLocal(details.globalPosition);
-    final size = renderBox.size;
-
-    // Convert tap position to normalized coordinates (0.0 - 1.0).
-    final focusPoint = Offset(
-      (localPosition.dx / size.width).clamp(0.0, 1.0),
-      (localPosition.dy / size.height).clamp(0.0, 1.0),
+    final local = box.globalToLocal(details.globalPosition);
+    final point = Offset(
+      (local.dx / box.size.width).clamp(0.0, 1.0),
+      (local.dy / box.size.height).clamp(0.0, 1.0),
     );
-
     try {
-      await controller.setFocusPoint(focusPoint);
-      await controller.setExposurePoint(focusPoint);
+      await controller.setFocusPoint(point);
+      await controller.setExposurePoint(point);
     } catch (e) {
       debugPrint('Focus failed: $e');
     }

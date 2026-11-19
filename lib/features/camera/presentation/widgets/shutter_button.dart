@@ -73,18 +73,10 @@ class _ShutterButtonState extends State<ShutterButton>
               shape: BoxShape.circle,
               color: AppColors.pureWhite,
             ),
-            child: widget.isProcessing
-                ? const Center(
-                    child: SizedBox(
-                      width: 24,
-                      height: 24,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2.5,
-                        color: AppColors.pureBlack,
-                      ),
-                    ),
-                  )
-                : null,
+            // Keep the shutter visually stable while it is temporarily
+            // locked; navigation to the editor is feedback enough and a
+            // spinner here distracts from the capture flow.
+            child: null,
           ),
         ),
       ),

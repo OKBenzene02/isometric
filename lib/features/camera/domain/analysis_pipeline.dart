@@ -1,6 +1,8 @@
 import 'dart:io';
 import 'dart:isolate';
+import 'dart:typed_data';
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 import 'package:flutter/foundation.dart';
 import 'package:isometric/common/core/config/model_config.dart';
 import 'package:isometric/features/camera/domain/object_labels.dart';
@@ -8,6 +10,9 @@ import 'package:isometric/features/camera/domain/scene_analysis.dart';
 import 'package:ultralytics_yolo/ultralytics_yolo.dart';
 
 enum AnalysisStage { loadingModels, segmenting, estimatingDepth, refining }
+
+const _kSegmentationTimeout = Duration(seconds: 12);
+
 class AnalysisPipeline {
   AnalysisPipeline._();
   static final AnalysisPipeline instance = AnalysisPipeline._();
@@ -29,40 +34,39 @@ class AnalysisPipeline {
 
     try {
       stage.value = AnalysisStage.loadingModels;
-      final segModel = await ModelLoader.instance.loadModel(
-        ModelType.segmentation,
-      );
-      final depthModel = await ModelLoader.instance.loadModel(ModelType.depth);
+      final segModel = await ModelLoader.instance
+          .loadModel(ModelType.segmentation)
+          .timeout(_kSegmentationTimeout);
       final loadMs = lap();
-      await Future.delayed(const Duration(milliseconds: 250));
 
-      final bytes = await File(imagePath).readAsBytes();
+      final bytes = await _prepareInput(imagePath);
       final readMs = lap();
 
       stage.value = AnalysisStage.segmenting;
-      final seg = _asResults(await segModel.predict(bytes));
+      final seg = _asResults(
+        await segModel.predict(bytes).timeout(_kSegmentationTimeout),
+      );
       final segMs = lap();
-      await Future.delayed(const Duration(milliseconds: 300));
-
-      stage.value = AnalysisStage.estimatingDepth;
-      final dep = _asResults(await depthModel.predict(bytes));
-      final depthMs = lap();
-      await Future.delayed(const Duration(milliseconds: 300));
 
       stage.value = AnalysisStage.refining;
       debugPrint('Detections found: ${seg.detections.length}');
       for (final d in seg.detections) {
-        debugPrint('Detected: ${d.className} (conf: ${d.confidence.toStringAsFixed(2)}, hasMask: ${d.mask != null && d.mask!.isNotEmpty})');
+        debugPrint(
+          'Detected: ${d.className} (conf: ${d.confidence.toStringAsFixed(2)}, hasMask: ${d.mask != null && d.mask!.isNotEmpty})',
+        );
       }
 
-      final input = _PostInput.from(seg, dep);
+      // A subject mask is sufficient for the compositor's segmentation-only
+      // bokeh mode. Skipping the depth pass keeps the capture flow responsive;
+      // on slower devices it was the second inference that left the loader on
+      // screen after segmentation had already finished.
+      final input = _PostInput.from(seg);
       final result = await Isolate.run(() => _postProcess(input));
       final postMs = lap();
-      await Future.delayed(const Duration(milliseconds: 200));
 
       debugPrint(
         'Analysis ${total.elapsedMilliseconds} ms '
-        '(load $loadMs, read $readMs, seg $segMs, depth $depthMs, '
+        '(load $loadMs, read $readMs, seg $segMs, '
         'post $postMs) -> ${result.scene.name}, '
         'subject=${result.subjectClass}, instances=${seg.detections.length}',
       );
@@ -72,6 +76,27 @@ class AnalysisPipeline {
       return SceneAnalysis.none();
     } finally {
       stage.value = null;
+    }
+  }
+
+  /// Upright, downscaled copy of the photo for the models. Flutter's decoder
+  /// applies the JPEG rotation tag; the plugin's native decoder does not, so
+  /// the rotation is baked into the pixels here, once.
+  Future<Uint8List> _prepareInput(String path, {int maxWidth = 1280}) async {
+    final bytes = await File(path).readAsBytes();
+    final codec = await ui.instantiateImageCodec(
+      bytes,
+      targetWidth: maxWidth,
+      allowUpscaling: false,
+    );
+    final image = (await codec.getNextFrame()).image;
+    codec.dispose();
+    try {
+      debugPrint('Model input: ${image.width}x${image.height}');
+      final data = await image.toByteData(format: ui.ImageByteFormat.png);
+      return data!.buffer.asUint8List();
+    } finally {
+      image.dispose();
     }
   }
 
@@ -85,7 +110,15 @@ class AnalysisPipeline {
 
 // ── Data sent to the isolate (plain, sendable objects only) ─────────────────
 class _Instance {
-  _Instance(this.name, this.confidence, this.x, this.y, this.w, this.h, this.mask);
+  _Instance(
+    this.name,
+    this.confidence,
+    this.x,
+    this.y,
+    this.w,
+    this.h,
+    this.mask,
+  );
 
   final String name;
   final double confidence;
@@ -94,21 +127,11 @@ class _Instance {
 }
 
 class _PostInput {
-  _PostInput(
-    this.instances,
-    this.depth,
-    this.depthW,
-    this.depthH,
-    this.depthMin,
-    this.depthMax,
-  );
+  _PostInput(this.instances);
 
   final List<_Instance> instances;
-  final Float32List? depth;
-  final int depthW, depthH;
-  final double depthMin, depthMax;
 
-  factory _PostInput.from(YOLODetectionResults seg, YOLODetectionResults dep) {
+  factory _PostInput.from(YOLODetectionResults seg) {
     final instances = <_Instance>[
       for (final d in seg.detections)
         _Instance(
@@ -121,23 +144,16 @@ class _PostInput {
           d.mask,
         ),
     ];
-    final map = dep.depthMap;
-    return _PostInput(
-      instances,
-      map?.values,
-      map?.width ?? 0,
-      map?.height ?? 0,
-      map?.minDepth ?? 0,
-      map?.maxDepth ?? 0,
-    );
+    return _PostInput(instances);
   }
 }
 
 // ── Everything below runs in the background isolate ─────────────────────────
 
-const int _kGrid = 640; // output mask resolution (model resolution)
-const double _kMinConfidence = 0.15; // lowered so objects are not discarded
-const double _kMinArea = 0.005; // 0.5% area threshold for smaller subjects
+const int _kGrid = 640;
+const double _kMinConfidence = 0.25;
+const double _kMinArea = 0.01;
+const int _kDepthRampPixels = 48;
 
 SceneAnalysis _postProcess(_PostInput input) {
   final sw = Stopwatch()..start();
@@ -146,8 +162,11 @@ SceneAnalysis _postProcess(_PostInput input) {
   if (subject == null) return SceneAnalysis.none();
 
   final mask = _rasterizeMask(subject);
-  final depth = _normalizeDepth(input);
-  final focus = _focusDepth(mask, depth, input.depthW, input.depthH);
+  // Turn the segmentation into a depth cue: the selected subject is the
+  // focus plane, and the background gains depth as it gets farther from that
+  // subject. This produces a gradual DSLR-like falloff without a second,
+  // slow depth-model inference.
+  final depth = _depthFromSegmentation(mask);
 
   return SceneAnalysis(
     hasSubject: true,
@@ -155,9 +174,9 @@ SceneAnalysis _postProcess(_PostInput input) {
     maskWidth: _kGrid,
     maskHeight: _kGrid,
     depth: depth,
-    depthWidth: input.depthW,
-    depthHeight: input.depthH,
-    focusDepth: focus,
+    depthWidth: _kGrid,
+    depthHeight: _kGrid,
+    focusDepth: 0.0,
     subjectClass: subject.name,
     scene: _classify(subject),
     postProcessMs: sw.elapsedMilliseconds,
@@ -172,7 +191,8 @@ _Instance? _pickSubject(List<_Instance> items) {
 
   for (final i in items) {
     final mask = i.mask;
-    if (i.confidence < _kMinConfidence || mask == null || mask.isEmpty) continue;
+    if (i.confidence < _kMinConfidence || mask == null || mask.isEmpty)
+      continue;
     if (mask.first.isEmpty) continue;
 
     final area = i.w * i.h;
@@ -269,53 +289,52 @@ Uint8List _rasterizeMask(_Instance s) {
   return out;
 }
 
-/// Metric depth (metres) -> 0..255 bytes, 0 = nearest.
-Uint8List? _normalizeDepth(_PostInput input) {
-  final d = input.depth;
-  if (d == null || d.isEmpty) return null;
+/// Generates a dense, mask-guided depth map. A two-pass chamfer distance
+/// transform makes pixels near the subject only slightly blurred and lets
+/// distant background ramp smoothly to full bokeh.
+Uint8List _depthFromSegmentation(Uint8List mask) {
+  const infinity = 1 << 20;
+  const straight = 10;
+  const diagonal = 14;
+  final distances = Int32List(_kGrid * _kGrid);
 
-  var lo = input.depthMin;
-  var hi = input.depthMax;
-  if (!(hi > lo)) {
-    lo = double.infinity;
-    hi = -double.infinity;
-    for (final v in d) {
-      if (v < lo) lo = v;
-      if (v > hi) hi = v;
-    }
-    if (!(hi > lo)) return null;
+  for (var i = 0; i < distances.length; i++) {
+    distances[i] = mask[i] > 127 ? 0 : infinity;
   }
 
-  final out = Uint8List(d.length);
-  final scale = 255 / (hi - lo);
-  for (var k = 0; k < d.length; k++) {
-    out[k] = ((d[k] - lo) * scale).clamp(0.0, 255.0).toInt();
-  }
-  return out;
-}
-
-/// Median depth (0..1) of the pixels inside the subject mask.
-double _focusDepth(Uint8List mask, Uint8List? depth, int dw, int dh) {
-  if (depth == null || dw == 0 || dh == 0) return 0.5;
-
-  final hist = List<int>.filled(256, 0);
-  var n = 0;
-  for (var y = 0; y < _kGrid; y += 2) {
-    final dy = y * dh ~/ _kGrid;
-    for (var x = 0; x < _kGrid; x += 2) {
-      if (mask[y * _kGrid + x] > 127) {
-        final dx = x * dw ~/ _kGrid;
-        hist[depth[dy * dw + dx]]++;
-        n++;
+  for (var y = 0; y < _kGrid; y++) {
+    for (var x = 0; x < _kGrid; x++) {
+      final i = y * _kGrid + x;
+      var best = distances[i];
+      if (x > 0) best = math.min(best, distances[i - 1] + straight);
+      if (y > 0) {
+        best = math.min(best, distances[i - _kGrid] + straight);
+        if (x > 0) best = math.min(best, distances[i - _kGrid - 1] + diagonal);
+        if (x + 1 < _kGrid) {
+          best = math.min(best, distances[i - _kGrid + 1] + diagonal);
+        }
       }
+      distances[i] = best;
     }
   }
-  if (n == 0) return 0.5;
 
-  var acc = 0;
-  for (var v = 0; v < 256; v++) {
-    acc += hist[v];
-    if (acc >= n / 2) return v / 255.0;
+  final maxDistance = _kDepthRampPixels * straight;
+  final depth = Uint8List(distances.length);
+  for (var y = _kGrid - 1; y >= 0; y--) {
+    for (var x = _kGrid - 1; x >= 0; x--) {
+      final i = y * _kGrid + x;
+      var best = distances[i];
+      if (x + 1 < _kGrid) best = math.min(best, distances[i + 1] + straight);
+      if (y + 1 < _kGrid) {
+        best = math.min(best, distances[i + _kGrid] + straight);
+        if (x > 0) best = math.min(best, distances[i + _kGrid - 1] + diagonal);
+        if (x + 1 < _kGrid) {
+          best = math.min(best, distances[i + _kGrid + 1] + diagonal);
+        }
+      }
+      distances[i] = best;
+      depth[i] = (best.clamp(0, maxDistance) * 255 ~/ maxDistance);
+    }
   }
-  return 0.5;
+  return depth;
 }

@@ -13,11 +13,7 @@ class PhotoEditorScreen extends StatefulWidget {
   final String? imagePath;
   final SceneAnalysis? analysis;
 
-  const PhotoEditorScreen({
-    super.key,
-    required this.imagePath,
-    this.analysis,
-  });
+  const PhotoEditorScreen({super.key, required this.imagePath, this.analysis});
 
   @override
   State<PhotoEditorScreen> createState() => _PhotoEditorScreenState();
@@ -26,93 +22,126 @@ class PhotoEditorScreen extends StatefulWidget {
 class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
   late ComposeParams _params;
   bool _showingOriginal = false;
-  bool _isRendering = true;
   String? _renderError;
 
-  ui.Image? _originalUiImage;
+  // One render at a time. If the user keeps dragging a slider meanwhile,
+  // exactly one more render runs afterwards with the latest values.
+  bool _renderInFlight = false;
+  bool _renderQueued = false;
+
+  ui.Image? _originalUiImage; // preview-sized copy of the photo
   ui.Image? _renderedUiImage;
   ui.Image? _maskImage;
   ui.Image? _depthImage;
 
+  bool get _hasSubject => widget.analysis?.hasSubject ?? false;
+
   @override
   void initState() {
     super.initState();
-    final scene = widget.analysis?.scene ?? SceneType.general;
-    _params = ComposeParams.forScene(scene);
+    _params = _autoParams();
     _loadAndRender();
   }
 
+  /// Scene preset; with no subject there is nothing to blur or light up.
+  ComposeParams _autoParams() {
+    final base = ComposeParams.forScene(
+      widget.analysis?.scene ?? SceneType.general,
+    );
+    return _hasSubject
+        ? base
+        : base.copyWith(blurStrength: 0.0, lightsAmount: 0.0);
+  }
+
   Future<void> _loadAndRender() async {
-    if (widget.imagePath == null || !File(widget.imagePath!).existsSync()) {
-      if (mounted) setState(() => _isRendering = false);
+    final path = widget.imagePath;
+    if (path == null || !File(path).existsSync()) {
       return;
     }
 
     try {
-      final bytes = await File(widget.imagePath!).readAsBytes();
-      final img = await imageFromBytes(bytes);
-      _originalUiImage = img;
+      final bytes = await File(path).readAsBytes();
 
-      final analysis = widget.analysis;
-      if (analysis != null && analysis.hasSubject && analysis.mask.isNotEmpty) {
-        _maskImage = await imageFromGray(
-          analysis.mask,
-          analysis.maskWidth,
-          analysis.maskHeight,
-        );
+      // Decode a preview-sized copy (max ~2048 px wide) instead of the full
+      // 12 MP photo: far cheaper for the shader and for memory.
+      final codec = await ui.instantiateImageCodec(
+        bytes,
+        targetWidth: 2048,
+        allowUpscaling: false,
+      );
+      final frame = await codec.getNextFrame();
+      codec.dispose();
+      _originalUiImage = frame.image;
+
+      final a = widget.analysis;
+      if (a != null && a.hasSubject && a.mask.isNotEmpty) {
+        _maskImage = await imageFromGray(a.mask, a.maskWidth, a.maskHeight);
       } else {
-        // Fallback: 1x1 black mask (all background, no subject cutout)
-        _maskImage = await imageFromGray(Uint8List.fromList([0]), 1, 1);
+        // No subject: an all-white mask means "everything is subject", so
+        // nothing gets blurred, even if a blur value is set.
+        _maskImage = await imageFromGray(Uint8List.fromList([255]), 1, 1);
       }
 
-      if (analysis != null && analysis.depth != null && analysis.depth!.isNotEmpty) {
-        _depthImage = await imageFromGray(
-          analysis.depth!,
-          analysis.depthWidth,
-          analysis.depthHeight,
-        );
+      final depth = a?.depth;
+      if (a != null && a.hasSubject && depth != null && depth.isNotEmpty) {
+        _depthImage = await imageFromGray(depth, a.depthWidth, a.depthHeight);
       }
 
-      await _applyShader();
+      await _runRender();
     } catch (e, st) {
-      debugPrint('Shader render error: $e\n$st');
+      debugPrint('Editor load error: $e\n$st');
       if (mounted) {
         setState(() {
-          _isRendering = false;
           _renderError = e.toString();
         });
       }
     }
   }
 
-  Future<void> _applyShader() async {
-    if (_originalUiImage == null || _maskImage == null) return;
-    if (mounted) setState(() => _isRendering = true);
+  void _requestRender() {
+    if (_renderInFlight) {
+      _renderQueued = true;
+      return;
+    }
+    _runRender();
+  }
 
+  Future<void> _runRender() async {
+    final image = _originalUiImage;
+    final mask = _maskImage;
+    if (image == null || mask == null) return;
+
+    _renderInFlight = true;
     try {
       final out = await DslrCompositor.render(
-        image: _originalUiImage!,
-        mask: _maskImage!,
+        image: image,
+        mask: mask,
         depth: _depthImage,
         params: _params,
         focusDepth: widget.analysis?.focusDepth ?? 0.5,
-        maxSide: 1920,
+        maxSide: 1280,
       );
 
-      if (mounted) {
-        setState(() {
-          _renderedUiImage?.dispose();
-          _renderedUiImage = out;
-          _isRendering = false;
-        });
+      if (!mounted) {
+        out.dispose();
+        return;
       }
+      setState(() {
+        _renderedUiImage?.dispose();
+        _renderedUiImage = out;
+      });
     } catch (e, st) {
       debugPrint('Compositor render error: $e\n$st');
       if (mounted) {
         setState(() {
-          _isRendering = false;
           _renderError = e.toString();
         });
+      }
+    } finally {
+      _renderInFlight = false;
+      if (_renderQueued && mounted) {
+        _renderQueued = false;
+        _runRender();
       }
     }
   }
@@ -158,11 +187,13 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
   }
 
   void _resetToAuto() {
-    final scene = widget.analysis?.scene ?? SceneType.general;
-    setState(() {
-      _params = ComposeParams.forScene(scene);
-    });
-    _applyShader();
+    setState(() => _params = _autoParams());
+    _requestRender();
+  }
+
+  void _updateParam(ComposeParams next) {
+    setState(() => _params = next);
+    _requestRender();
   }
 
   @override
@@ -181,32 +212,6 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
                 children: [
                   _buildImageView(),
 
-                  if (_isRendering)
-                    Container(
-                      color: Colors.black45,
-                      child: const Center(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            CircularProgressIndicator(
-                              color: AppColors.pureWhite,
-                              strokeWidth: 2.5,
-                            ),
-                            SizedBox(height: 12),
-                            Text(
-                              'APPLYING DSLR SHADER...',
-                              style: TextStyle(
-                                color: Colors.white,
-                                fontSize: 11,
-                                letterSpacing: 1.2,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-
                   // Hold-to-compare button
                   Positioned(
                     top: 14,
@@ -214,7 +219,8 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
                     child: GestureDetector(
                       onTapDown: (_) => setState(() => _showingOriginal = true),
                       onTapUp: (_) => setState(() => _showingOriginal = false),
-                      onTapCancel: () => setState(() => _showingOriginal = false),
+                      onTapCancel: () =>
+                          setState(() => _showingOriginal = false),
                       child: GlassContainer(
                         borderRadius: 20,
                         padding: const EdgeInsets.symmetric(
@@ -310,7 +316,7 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
             tooltip: 'Retake',
           ),
           Text(
-            widget.analysis != null && widget.analysis!.hasSubject
+            _hasSubject
                 ? 'DSLR BOKEH: ${widget.analysis!.subjectClass?.toUpperCase() ?? "SUBJECT"}'
                 : 'DSLR EDIT',
             style: AppTypography.cameraTelemetry(
@@ -344,11 +350,10 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
     if (imgToShow != null) {
       return Padding(
         padding: const EdgeInsets.all(12.0),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(14),
-          child: RawImage(
-            image: imgToShow,
-            fit: BoxFit.contain,
+        child: RepaintBoundary(
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(14),
+            child: RawImage(image: imgToShow, fit: BoxFit.contain),
           ),
         ),
       );
@@ -384,7 +389,10 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
             _params.blurStrength,
             0.0,
             1.0,
-            (v) => _updateParam(_params.copyWith(blurStrength: v)),
+            // Disabled when no subject was found: nothing to separate.
+            _hasSubject
+                ? (v) => _updateParam(_params.copyWith(blurStrength: v))
+                : null,
           ),
           _sliderRow(
             'WARMTH',
@@ -415,18 +423,13 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
     );
   }
 
-  void _updateParam(ComposeParams next) {
-    setState(() => _params = next);
-    _applyShader();
-  }
-
   Widget _sliderRow(
     String label,
     String valueString,
     double value,
     double min,
     double max,
-    ValueChanged<double> onChanged,
+    ValueChanged<double>? onChanged,
   ) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 2),

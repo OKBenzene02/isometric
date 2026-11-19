@@ -7,8 +7,9 @@ import 'package:isometric/features/camera/presentation/screens/camera_run.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Load models in background during app launch
-  ModelLoader.instance.loadAllModels().catchError((e) {
+  // Load the two models used for subject separation and depth-of-field in
+  // the background while the camera starts.
+  ModelLoader.instance.preloadBokehModels().catchError((e) {
     debugPrint('Model loading warning: $e');
   });
 

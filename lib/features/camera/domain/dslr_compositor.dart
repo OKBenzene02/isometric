@@ -37,9 +37,11 @@ class ComposeParams {
 
   const ComposeParams({
     this.blurStrength = 0.0,
-    this.focusRange = 0.25,
+    this.focusRange = 0.18,
     this.highlightThreshold = 0.8,
-    this.highlightBoost = 3.0,
+    // Keep natural highlight values in blurred areas. Boosting them produced
+    // a white haze around bright edges instead of optical bokeh.
+    this.highlightBoost = 0.0,
     this.lightsAmount = 0.0,
     this.lightsDensity = 0.25,
     this.lightSize = 0.09,
@@ -64,7 +66,6 @@ class ComposeParams {
       case SceneType.portrait:
         return const ComposeParams(
           blurStrength: 0.70,
-          lightsAmount: 0.35,
           sharpen: 0.30,
           exposure: 0.05,
           warmth: 0.06,
@@ -102,8 +103,6 @@ class ComposeParams {
       case SceneType.lowLight:
         return const ComposeParams(
           blurStrength: 0.40,
-          lightsAmount: 0.50,
-          lightsDensity: 0.35,
           exposure: 0.25,
           contrast: 0.95,
           shoulder: 0.75,
@@ -113,7 +112,6 @@ class ComposeParams {
       case SceneType.general:
         return const ComposeParams(
           blurStrength: 0.55,
-          lightsAmount: 0.20,
           sharpen: 0.25,
           warmth: 0.04,
           satSubject: 1.04,
@@ -211,7 +209,9 @@ class DslrCompositor {
 
     f(w.toDouble()); // uSize.x
     f(h.toDouble()); // uSize.y
-    f(params.blurStrength * 0.012 * longSide); // uMaxRadius (px)
+    // A stronger optical blur range: at 100%, a 1280 px preview can reach
+    // roughly 36 px of blur instead of the previous 15 px.
+    f(params.blurStrength * 0.028 * longSide); // uMaxRadius (px)
     f(depth != null ? 1.0 : 0.0); // uUseDepth
     f(focusDepth); // uFocusDepth
     f(params.focusRange); // uFocusRange
