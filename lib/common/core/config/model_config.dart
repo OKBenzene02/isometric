@@ -1,3 +1,7 @@
+import 'dart:io';
+import 'dart:isolate';
+
+import 'package:flutter/services.dart';
 import 'package:ultralytics_yolo/ultralytics_yolo.dart';
 
 enum ModelType { detection, segmentation, semanticSegmentation, depth }
@@ -104,11 +108,29 @@ class ModelLoader {
     }
   }
 
-  /// Warm the segmentation model used to separate the subject from its
-  /// background. Depth is intentionally not part of capture analysis because
-  /// a second native inference can leave the camera loader waiting too long.
+  /// Warm segmentation on launch. Depth loads when capture finds a subject.
   Future<void> preloadBokehModels() async {
+    if (Platform.isAndroid) {
+      await _photoChannel.invokeMethod<void>(
+        'warm',
+        _photoArguments(ModelType.segmentation),
+      );
+      return;
+    }
     await loadModel(ModelType.segmentation);
+  }
+
+  Future<YOLODetectionResults> predictPhoto(
+    ModelType type,
+    Uint8List bytes,
+  ) async {
+    if (Platform.isAndroid) {
+      final token = RootIsolateToken.instance!;
+      final arguments = _photoArguments(type)..['image'] = bytes;
+      return _predictOffUiThread(token, arguments);
+    }
+    final model = await loadModel(type);
+    return YOLODetectionResults.fromMap(await model.predict(bytes));
   }
 
   /// Get an already loaded model.
@@ -124,3 +146,23 @@ class ModelLoader {
   /// Number of currently loaded models.
   int get loadedCount => _loadedModels.length;
 }
+
+const _photoChannel = MethodChannel('com.example.isometric/photo_inference');
+
+Map<String, Object> _photoArguments(ModelType type) {
+  final model = ModelConfig.models[type]!;
+  return {'task': model.task.name, 'asset': model.assetPath};
+}
+
+Future<YOLODetectionResults> _predictOffUiThread(
+  RootIsolateToken token,
+  Map<String, Object> arguments,
+) => Isolate.run(() async {
+  BackgroundIsolateBinaryMessenger.ensureInitialized(token);
+  final result = await _photoChannel.invokeMapMethod<Object?, Object?>(
+    'predict',
+    arguments,
+  );
+  // Decoding dense masks into Dart objects can also stall the UI isolate.
+  return YOLODetectionResults.fromMap(result!);
+});

@@ -1,10 +1,7 @@
-import 'dart:io';
-import 'dart:typed_data';
-import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:isometric/common/theme/theme.dart';
 import 'package:isometric/common/widgets/glass_container.dart';
-import 'package:isometric/features/camera/domain/dslr_compositor.dart';
+import 'package:isometric/features/camera/domain/photo_editor_session.dart';
 import 'package:isometric/features/camera/domain/scene_analysis.dart';
 
 /// Clean DSLR Editor Screen:
@@ -20,139 +17,22 @@ class PhotoEditorScreen extends StatefulWidget {
 }
 
 class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
-  late ComposeParams _params;
+  late final PhotoEditorSession _session;
   bool _showingOriginal = false;
-  String? _renderError;
-
-  // One render at a time. If the user keeps dragging a slider meanwhile,
-  // exactly one more render runs afterwards with the latest values.
-  bool _renderInFlight = false;
-  bool _renderQueued = false;
-
-  ui.Image? _originalUiImage; // preview-sized copy of the photo
-  ui.Image? _renderedUiImage;
-  ui.Image? _maskImage;
-  ui.Image? _depthImage;
-  int _selectedAdjustment = 0;
-
-  bool get _hasSubject => widget.analysis?.hasSubject ?? false;
+  PhotoAdjustment _selectedAdjustment = PhotoAdjustment.blur;
 
   @override
   void initState() {
     super.initState();
-    _params = _autoParams();
-    _loadAndRender();
-  }
-
-  /// Scene preset; with no subject there is nothing to blur or light up.
-  ComposeParams _autoParams() {
-    final base = ComposeParams.forScene(
-      widget.analysis?.scene ?? SceneType.general,
-    );
-    return _hasSubject
-        ? base
-        : base.copyWith(blurStrength: 0.0, lightsAmount: 0.0);
-  }
-
-  Future<void> _loadAndRender() async {
-    final path = widget.imagePath;
-    if (path == null || !File(path).existsSync()) {
-      return;
-    }
-
-    try {
-      final bytes = await File(path).readAsBytes();
-
-      // Decode a preview-sized copy (max ~2048 px wide) instead of the full
-      // 12 MP photo: far cheaper for the shader and for memory.
-      final codec = await ui.instantiateImageCodec(
-        bytes,
-        targetWidth: 2048,
-        allowUpscaling: false,
-      );
-      final frame = await codec.getNextFrame();
-      codec.dispose();
-      _originalUiImage = frame.image;
-
-      final a = widget.analysis;
-      if (a != null && a.hasSubject && a.mask.isNotEmpty) {
-        _maskImage = await imageFromGray(a.mask, a.maskWidth, a.maskHeight);
-      } else {
-        // No subject: an all-white mask means "everything is subject", so
-        // nothing gets blurred, even if a blur value is set.
-        _maskImage = await imageFromGray(Uint8List.fromList([255]), 1, 1);
-      }
-
-      final depth = a?.depth;
-      if (a != null && a.hasSubject && depth != null && depth.isNotEmpty) {
-        _depthImage = await imageFromGray(depth, a.depthWidth, a.depthHeight);
-      }
-
-      await _runRender();
-    } catch (e, st) {
-      debugPrint('Editor load error: $e\n$st');
-      if (mounted) {
-        setState(() {
-          _renderError = e.toString();
-        });
-      }
-    }
-  }
-
-  void _requestRender() {
-    if (_renderInFlight) {
-      _renderQueued = true;
-      return;
-    }
-    _runRender();
-  }
-
-  Future<void> _runRender() async {
-    final image = _originalUiImage;
-    final mask = _maskImage;
-    if (image == null || mask == null) return;
-
-    _renderInFlight = true;
-    try {
-      final out = await DslrCompositor.render(
-        image: image,
-        mask: mask,
-        depth: _depthImage,
-        params: _params,
-        focusDepth: widget.analysis?.focusDepth ?? 0.5,
-        maxSide: 1280,
-      );
-
-      if (!mounted) {
-        out.dispose();
-        return;
-      }
-      setState(() {
-        _renderedUiImage?.dispose();
-        _renderedUiImage = out;
-      });
-    } catch (e, st) {
-      debugPrint('Compositor render error: $e\n$st');
-      if (mounted) {
-        setState(() {
-          _renderError = e.toString();
-        });
-      }
-    } finally {
-      _renderInFlight = false;
-      if (_renderQueued && mounted) {
-        _renderQueued = false;
-        _runRender();
-      }
-    }
+    _session = PhotoEditorSession(
+      imagePath: widget.imagePath,
+      analysis: widget.analysis,
+    )..load();
   }
 
   @override
   void dispose() {
-    _originalUiImage?.dispose();
-    _renderedUiImage?.dispose();
-    _maskImage?.dispose();
-    _depthImage?.dispose();
+    _session.dispose();
     super.dispose();
   }
 
@@ -187,18 +67,13 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
     Navigator.of(context).pop();
   }
 
-  void _resetToAuto() {
-    setState(() => _params = _autoParams());
-    _requestRender();
-  }
-
-  void _updateParam(ComposeParams next) {
-    setState(() => _params = next);
-    _requestRender();
-  }
-
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: _session,
+    builder: (_, _) => _buildEditor(),
+  );
+
+  Widget _buildEditor() {
     return Scaffold(
       backgroundColor: AppColors.pureBlack,
       body: SafeArea(
@@ -261,7 +136,7 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
                     ),
                   ),
 
-                  // Reset to Auto button
+                  // Reset manual adjustments
                   Positioned(
                     top: 14,
                     left: 16,
@@ -273,7 +148,7 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
                       ),
                       backgroundColor: AppColors.glassBackground,
                       borderColor: AppColors.glassBorder,
-                      onTap: _resetToAuto,
+                      onTap: _session.reset,
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
@@ -284,7 +159,7 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
                           ),
                           const SizedBox(width: 6),
                           Text(
-                            'RESET AUTO',
+                            'RESET',
                             style: AppTypography.cameraTelemetry(
                               fontSize: 10,
                               color: AppColors.pureWhite,
@@ -317,7 +192,7 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
             tooltip: 'Retake',
           ),
           Text(
-            _hasSubject
+            _session.hasSubject
                 ? 'DSLR BOKEH: ${widget.analysis!.subjectClass?.toUpperCase() ?? "SUBJECT"}'
                 : 'DSLR EDIT',
             style: AppTypography.cameraTelemetry(
@@ -344,9 +219,7 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
   }
 
   Widget _buildImageView() {
-    final imgToShow = _showingOriginal
-        ? _originalUiImage
-        : (_renderedUiImage ?? _originalUiImage);
+    final imgToShow = _showingOriginal ? _session.original : _session.preview;
 
     if (imgToShow != null) {
       return Padding(
@@ -360,68 +233,28 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
       );
     }
 
-    if (_renderError != null) {
+    if (_session.error != null) {
       return Center(
         child: Padding(
           padding: const EdgeInsets.all(24.0),
           child: Text(
-            'Render error: $_renderError',
+            'Render error: ${_session.error}',
             style: const TextStyle(color: Colors.redAccent, fontSize: 12),
           ),
         ),
       );
     }
 
-    return const Center(
-      child: CircularProgressIndicator(color: AppColors.pureWhite),
-    );
+    return const SizedBox.expand();
   }
 
-  List<_Adjustment> _adjustments() => [
-    _Adjustment(
-      label: 'BLUR',
-      icon: Icons.blur_on_rounded,
-      min: 0.0,
-      max: 1.0,
-      value: _params.blurStrength,
-      display: '${(_params.blurStrength * 100).round()}%',
-      // Disabled when no subject was found: nothing to separate.
-      onChanged: _hasSubject
-          ? (v) => _updateParam(_params.copyWith(blurStrength: v))
-          : null,
-    ),
-    _Adjustment(
-      label: 'WARMTH',
-      icon: Icons.thermostat_rounded,
-      min: -0.3,
-      max: 0.3,
-      value: _params.warmth,
-      display: '${(_params.warmth * 100).round()}',
-      onChanged: (v) => _updateParam(_params.copyWith(warmth: v)),
-    ),
-    _Adjustment(
-      label: 'EXPOSURE',
-      icon: Icons.exposure_rounded,
-      min: -0.5,
-      max: 0.5,
-      value: _params.exposure,
-      display: '${(_params.exposure * 100).round()}',
-      onChanged: (v) => _updateParam(_params.copyWith(exposure: v)),
-    ),
-    _Adjustment(
-      label: 'VIGNETTE',
-      icon: Icons.vignette_rounded,
-      min: 0.0,
-      max: 0.6,
-      value: _params.vignette,
-      display: '${(_params.vignette * 100).round()}%',
-      onChanged: (v) => _updateParam(_params.copyWith(vignette: v)),
-    ),
-  ];
-
   Widget _buildAdjustmentPanel() {
-    final items = _adjustments();
-    final selected = items[_selectedAdjustment.clamp(0, items.length - 1)];
+    final selected = _selectedAdjustment;
+    final value = _session.valueOf(selected);
+    final percent =
+        selected == PhotoAdjustment.blur ||
+        selected == PhotoAdjustment.vignette;
+    final display = '${(value * 100).round()}${percent ? '%' : ''}';
 
     return Container(
       color: AppColors.dark950,
@@ -436,7 +269,7 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 Text(
-                  selected.label,
+                  selected.name.toUpperCase(),
                   style: AppTypography.cameraTelemetry(
                     fontSize: 11,
                     fontWeight: FontWeight.w700,
@@ -445,7 +278,7 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
                   ),
                 ),
                 Text(
-                  selected.display,
+                  display,
                   style: AppTypography.cameraTelemetry(
                     fontSize: 11,
                     color: AppColors.grey200,
@@ -456,11 +289,16 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
           ),
 
           // One slider for whichever circle is selected
-          Slider(
-            value: selected.value.clamp(selected.min, selected.max),
-            min: selected.min,
-            max: selected.max,
-            onChanged: selected.onChanged,
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 24),
+            child: Slider(
+              value: value,
+              min: selected.min,
+              max: selected.max,
+              onChanged: _session.canAdjust(selected)
+                  ? (value) => _session.setAdjustment(selected, value)
+                  : null,
+            ),
           ),
 
           const SizedBox(height: 4),
@@ -473,13 +311,10 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
                 shrinkWrap: true,
                 scrollDirection: Axis.horizontal,
                 padding: const EdgeInsets.symmetric(horizontal: 20),
-                itemCount: items.length,
-                separatorBuilder: (_, __) => const SizedBox(width: 18),
-                itemBuilder: (_, i) => _adjustmentCircle(
-                  items[i],
-                  active: i == _selectedAdjustment,
-                  onTap: () => setState(() => _selectedAdjustment = i),
-                ),
+                itemCount: PhotoAdjustment.values.length,
+                separatorBuilder: (_, _) => const SizedBox(width: 18),
+                itemBuilder: (_, i) =>
+                    _adjustmentCircle(PhotoAdjustment.values[i]),
               ),
             ),
           ),
@@ -488,18 +323,23 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
     );
   }
 
-  Widget _adjustmentCircle(
-    _Adjustment item, {
-    required bool active,
-    required VoidCallback onTap,
-  }) {
-    final enabled = item.onChanged != null;
+  Widget _adjustmentCircle(PhotoAdjustment item) {
+    final active = item == _selectedAdjustment;
+    final enabled = _session.canAdjust(item);
+    final icon = switch (item) {
+      PhotoAdjustment.blur => Icons.blur_on_rounded,
+      PhotoAdjustment.warmth => Icons.thermostat_rounded,
+      PhotoAdjustment.exposure => Icons.exposure_rounded,
+      PhotoAdjustment.vignette => Icons.vignette_rounded,
+    };
     final fg = active ? AppColors.pureBlack : AppColors.pureWhite;
 
     return Opacity(
       opacity: enabled ? 1.0 : 0.35,
       child: GestureDetector(
-        onTap: enabled ? onTap : null,
+        onTap: enabled
+            ? () => setState(() => _selectedAdjustment = item)
+            : null,
         behavior: HitTestBehavior.opaque,
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -516,11 +356,11 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
                   width: 1,
                 ),
               ),
-              child: Icon(item.icon, size: 22, color: fg),
+              child: Icon(icon, size: 22, color: fg),
             ),
             const SizedBox(height: 6),
             Text(
-              item.label,
+              item.name.toUpperCase(),
               style: AppTypography.cameraTelemetry(
                 fontSize: 9,
                 color: active ? AppColors.pureWhite : AppColors.grey400,
@@ -531,24 +371,4 @@ class _PhotoEditorScreenState extends State<PhotoEditorScreen> {
       ),
     );
   }
-}
-
-class _Adjustment {
-  final String label;
-  final IconData icon;
-  final double min;
-  final double max;
-  final double value;
-  final String display;
-  final ValueChanged<double>? onChanged;
-
-  const _Adjustment({
-    required this.label,
-    required this.icon,
-    required this.min,
-    required this.max,
-    required this.value,
-    required this.display,
-    required this.onChanged,
-  });
 }

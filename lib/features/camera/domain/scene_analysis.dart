@@ -15,6 +15,7 @@ class SceneAnalysis {
     this.depthWidth = 0,
     this.depthHeight = 0,
     this.focusDepth = 0.5,
+    this.focusRange,
     this.subjectClass,
     this.postProcessMs = 0,
   });
@@ -22,12 +23,12 @@ class SceneAnalysis {
   /// No subject found, or the analysis failed. The compositor must NOT blur
   /// in this case: an empty mask would be treated as "all background".
   factory SceneAnalysis.none() => SceneAnalysis(
-        hasSubject: false,
-        mask: Uint8List(1),
-        maskWidth: 1,
-        maskHeight: 1,
-        scene: SceneType.landscape,
-      );
+    hasSubject: false,
+    mask: Uint8List(1),
+    maskWidth: 1,
+    maskHeight: 1,
+    scene: SceneType.landscape,
+  );
 
   final bool hasSubject;
 
@@ -37,13 +38,16 @@ class SceneAnalysis {
   final int maskWidth;
   final int maskHeight;
 
-  /// One byte per pixel, 0 = nearest .. 255 = farthest. Null if unavailable.
+  /// One byte per pixel in the blur shader's depth coordinate system.
   final Uint8List? depth;
   final int depthWidth;
   final int depthHeight;
 
-  /// Median depth (0..1, same scale as [depth]) under the subject.
+  /// Focus plane in the same 0..1 scale as [depth].
   final double focusDepth;
+
+  /// Depth difference that reaches full blur, or null for the shader default.
+  final double? focusRange;
 
   final String? subjectClass;
   final SceneType scene;

@@ -1,6 +1,5 @@
 import 'dart:io';
 import 'dart:isolate';
-import 'dart:typed_data';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 import 'package:flutter/foundation.dart';
@@ -12,6 +11,7 @@ import 'package:ultralytics_yolo/ultralytics_yolo.dart';
 enum AnalysisStage { loadingModels, segmenting, estimatingDepth, refining }
 
 const _kSegmentationTimeout = Duration(seconds: 12);
+const _kDepthTimeout = Duration(seconds: 8);
 
 class AnalysisPipeline {
   AnalysisPipeline._();
@@ -20,6 +20,69 @@ class AnalysisPipeline {
   final ValueNotifier<AnalysisStage?> stage = ValueNotifier<AnalysisStage?>(
     null,
   );
+
+  Future<YOLODepthMap?>? _depthPrediction;
+  Future<YOLODetectionResults>? _segmentationPrediction;
+
+  Future<YOLODetectionResults> _segment(Uint8List bytes) async {
+    if (_segmentationPrediction != null) {
+      throw StateError('The previous segmentation is still running.');
+    }
+    final prediction = ModelLoader.instance.predictPhoto(
+      ModelType.segmentation,
+      bytes,
+    );
+    _segmentationPrediction = prediction;
+    final tracked = prediction.whenComplete(() => _segmentationPrediction = null);
+    return tracked.timeout(_kSegmentationTimeout);
+  }
+
+  /// Refines the selected subject's blur map using the same image as segmentation.
+  Future<SceneAnalysis> _refineDepth(
+    Uint8List bytes,
+    SceneAnalysis analysis,
+  ) async {
+    if (!analysis.hasSubject || _depthPrediction != null) return analysis;
+
+    // Keep the native request reserved until it actually finishes, even if
+    // capture stops waiting. A Dart timeout cannot cancel native inference.
+    stage.value = AnalysisStage.estimatingDepth;
+    final prediction = _predictDepth(bytes);
+    _depthPrediction = prediction;
+    final tracked = prediction.whenComplete(() => _depthPrediction = null);
+    try {
+      final depth = await tracked.timeout(_kDepthTimeout);
+      if (depth == null) return analysis;
+      stage.value = AnalysisStage.refining;
+      final fused = await Isolate.run(() => _fuseDepth(depth, analysis));
+      if (fused == null) return analysis;
+      return SceneAnalysis(
+        hasSubject: analysis.hasSubject,
+        mask: analysis.mask,
+        maskWidth: analysis.maskWidth,
+        maskHeight: analysis.maskHeight,
+        scene: analysis.scene,
+        depth: fused,
+        depthWidth: _kRefinedDepthSize,
+        depthHeight: _kRefinedDepthSize,
+        focusDepth: 0,
+        focusRange: 1,
+        subjectClass: analysis.subjectClass,
+        postProcessMs: analysis.postProcessMs,
+      );
+    } catch (error) {
+      debugPrint('Depth refinement failed: $error');
+      return analysis;
+    }
+  }
+
+  Future<YOLODepthMap?> _predictDepth(Uint8List bytes) async {
+    final result = await ModelLoader.instance.predictPhoto(
+      ModelType.depth,
+      bytes,
+    );
+    return result.depthMap;
+  }
 
   /// Never throws: on any failure it returns [SceneAnalysis.none], so the
   /// editor still opens (with grading only, no blur).
@@ -34,18 +97,11 @@ class AnalysisPipeline {
 
     try {
       stage.value = AnalysisStage.loadingModels;
-      final segModel = await ModelLoader.instance
-          .loadModel(ModelType.segmentation)
-          .timeout(_kSegmentationTimeout);
-      final loadMs = lap();
-
       final bytes = await _prepareInput(imagePath);
       final readMs = lap();
 
       stage.value = AnalysisStage.segmenting;
-      final seg = _asResults(
-        await segModel.predict(bytes).timeout(_kSegmentationTimeout),
-      );
+      final seg = await _segment(bytes);
       final segMs = lap();
 
       stage.value = AnalysisStage.refining;
@@ -56,18 +112,16 @@ class AnalysisPipeline {
         );
       }
 
-      // A subject mask is sufficient for the compositor's segmentation-only
-      // bokeh mode. Skipping the depth pass keeps the capture flow responsive;
-      // on slower devices it was the second inference that left the loader on
-      // screen after segmentation had already finished.
       final input = _PostInput.from(seg);
-      final result = await Isolate.run(() => _postProcess(input));
+      final segmented = await Isolate.run(() => _postProcess(input));
       final postMs = lap();
+      final result = await _refineDepth(bytes, segmented);
+      final depthMs = lap();
 
       debugPrint(
         'Analysis ${total.elapsedMilliseconds} ms '
-        '(load $loadMs, read $readMs, seg $segMs, '
-        'post $postMs) -> ${result.scene.name}, '
+        '(read $readMs, seg $segMs, '
+        'post $postMs, depth $depthMs) -> ${result.scene.name}, '
         'subject=${result.subjectClass}, instances=${seg.detections.length}',
       );
       return result;
@@ -98,13 +152,6 @@ class AnalysisPipeline {
     } finally {
       image.dispose();
     }
-  }
-
-  /// predict() may hand back a ready object or a raw map depending on the
-  /// plugin version; accept both.
-  YOLODetectionResults _asResults(Object raw) {
-    if (raw is YOLODetectionResults) return raw;
-    return YOLODetectionResults.fromMap(Map<dynamic, dynamic>.from(raw as Map));
   }
 }
 
@@ -154,6 +201,67 @@ const int _kGrid = 640;
 const double _kMinConfidence = 0.25;
 const double _kMinArea = 0.01;
 const int _kDepthRampPixels = 48;
+const int _kRefinedDepthSize = 256;
+
+Uint8List? _fuseDepth(YOLODepthMap depth, SceneAnalysis analysis) {
+  final width = depth.width;
+  final height = depth.height;
+  if (width <= 0 || height <= 0 || depth.values.length != width * height) {
+    return null;
+  }
+
+  final subject = <double>[];
+  final background = <double>[];
+  final values = Float32List(_kRefinedDepthSize * _kRefinedDepthSize);
+  final maskIndices = Int32List(values.length);
+  for (var y = 0; y < _kRefinedDepthSize; y++) {
+    for (var x = 0; x < _kRefinedDepthSize; x++) {
+      final index = y * _kRefinedDepthSize + x;
+      final u = (x + 0.5) / _kRefinedDepthSize;
+      final v = (y + 0.5) / _kRefinedDepthSize;
+      final maskIndex =
+          (v * analysis.maskHeight).floor() * analysis.maskWidth +
+          (u * analysis.maskWidth).floor();
+      maskIndices[index] = maskIndex;
+      final distance =
+          depth.values[(v * height).floor() * width + (u * width).floor()];
+      values[index] = distance;
+      if (!distance.isFinite || distance <= 0) continue;
+      if (analysis.mask[maskIndex] >= 192) {
+        subject.add(distance);
+      } else if (analysis.mask[maskIndex] <= 32) {
+        background.add(distance);
+      }
+    }
+  }
+  if (subject.isEmpty || background.isEmpty) return null;
+
+  subject.sort();
+  final focus = subject[subject.length ~/ 2];
+  final differences = background.map((v) => (v - focus).abs()).toList()..sort();
+  final fullBlurDistance =
+      differences[((differences.length - 1) * .85).round()];
+  if (fullBlurDistance <= .001) return null;
+
+  final ramp = analysis.depth;
+  final hasRamp =
+      ramp != null &&
+      analysis.depthWidth == analysis.maskWidth &&
+      analysis.depthHeight == analysis.maskHeight;
+  final output = Uint8List(values.length);
+  for (var i = 0; i < values.length; i++) {
+    final maskIndex = maskIndices[i];
+    if (analysis.mask[maskIndex] >= 192) continue;
+    // Use the inner fifth of the mask ramp to ease blur in at the silhouette.
+    final edgeRamp = hasRamp ? (ramp[maskIndex] / 51).clamp(0.0, 1.0) : 1.0;
+    final distance = values[i];
+    final modelBlur = distance.isFinite && distance > 0
+        ? ((distance - focus).abs() / fullBlurDistance).clamp(0.0, 1.0)
+        : 1.0;
+    output[i] = (255 * edgeRamp * (0.25 + 0.75 * modelBlur)).round();
+  }
+  return output;
+}
 
 SceneAnalysis _postProcess(_PostInput input) {
   final sw = Stopwatch()..start();
@@ -191,8 +299,9 @@ _Instance? _pickSubject(List<_Instance> items) {
 
   for (final i in items) {
     final mask = i.mask;
-    if (i.confidence < _kMinConfidence || mask == null || mask.isEmpty)
+    if (i.confidence < _kMinConfidence || mask == null || mask.isEmpty) {
       continue;
+    }
     if (mask.first.isEmpty) continue;
 
     final area = i.w * i.h;
