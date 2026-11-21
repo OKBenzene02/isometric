@@ -1,4 +1,4 @@
-# Isometric Camera
+# <div style="display: flex; align-items: center; gap: 12px;"><img src="android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png" alt="Isometric Camera" width="80"/><strong>Isometric Camera</strong></div>
 
 Isometric is a Flutter camera that gives your photos a DSLR-style look with one tap. Press the shutter and the app automatically analyzes the scene, then opens an enhanced preview with subject-aware depth of field, color grading, and detail adjustments. You can fine-tune the result in the built-in editor.
 
